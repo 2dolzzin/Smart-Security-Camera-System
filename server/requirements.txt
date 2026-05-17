@@ -1,0 +1,16 @@
+# VLM 서버(AWS GPU 인스턴스)에서 설치.
+# torch / transformers / accelerate / qwen-vl-utils 는 보통 이미 깔려 있으므로
+# 버전 충돌이 걱정되면 아래 3개(API 서버용)만 설치해도 됨:
+#   pip install fastapi "uvicorn[standard]" python-multipart
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.12
+
+# 추론 스택 (이미 설치돼 있으면 생략 가능)
+torch
+transformers>=4.49.0
+accelerate
+qwen-vl-utils
+# 영상 디코딩 백엔드 (process_vision_info 가 video 처리 시 필요)
+torchvision
+av
