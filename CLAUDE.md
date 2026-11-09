@@ -1,7 +1,8 @@
 # CCTV VLM 졸업작품 — 작업 기록 및 인계 문서
 
 > 작성일: 2026-11-10. 서버 `hail-pro6000`에서 진행. 이 문서는 Claude Code 세션의 컨텍스트용이다.
-> **연구 파트(데이터 → LoRA → 평가) 완료. 4단계 시스템 통합(6.1 서버 어댑터 + 6.2~6.4 클라이언트)도 코드·API 테스트까지 완료(2026-11-10, 서버에서). 남은 것: 노트북에서 실제 카메라로 UI 확인(6.6), 데모·보고서(5단계).**
+> **연구 파트(데이터 → LoRA → 평가) 완료. 4단계 시스템 통합 완료(2026-11-10): 서버 어댑터(6.1) + 클라이언트(6.2~6.4) + 노트북 웹캠 → 서버 → 창 로그 end-to-end 1회 성공 확인. 남은 것: UI를 눈으로 다듬기, 데모 촬영·보고서(5단계).**
+> **현재 서버 상태(2026-11-10 06:45 기준): vLLM(:8002)·어댑터(:8010) 둘 다 꺼져 있음.** 사용자가 당장 안 쓴다고 내린 것. 다시 쓸 땐 2절 '서버 켜는 순서'.
 > 이 파일은 서버 `~/Videos/CLAUDE.md`이고, 리포 루트 `CLAUDE.md`에 복사본을 커밋한다(노트북에서 Claude Code가 읽도록). 둘 중 하나 고치면 다른 쪽도 맞출 것.
 
 ---
@@ -62,7 +63,21 @@ teacher(Qwen3-VL-32B)가 로그 본문을 쓰고 이상여부·유형은 데이�
 
 ### tmux
 세션 `vlm`: 창 0 `work`(작업), 창 1 `server`(vLLM 서버 :8002), 창 2 `bash`, 창 3 `adapter`(어댑터 :8010). prefix는 `Ctrl+B` 뗀 뒤 키.
-서버는 반드시 tmux 안에서 띄운다.
+서버는 반드시 tmux 안에서 띄운다. **창 1·3에서는 명령을 치지 말 것** — 거기서 Ctrl+C 하거나 다른 명령을 치면 서버가 죽는다(2026-11-10에 두 번 발생, 노트북 요청이 502로 떨어짐).
+
+### 서버 켜는 순서 (둘 다 꺼져 있을 때)
+```bash
+# 0) 빈 GPU 확인
+nvidia-smi
+# 1) tmux 창 1 (server)  — 모델 로딩 약 1분, 로그에 "Uvicorn running" 뜨면 됨
+conda activate cctv
+CUDA_VISIBLE_DEVICES=1 vllm serve ~/Videos/lf/models/qwen3vl8b-cctv --port 8002 --max-model-len 8192 --limit-mm-per-prompt '{"image":8}' --gpu-memory-utilization 0.8
+# 2) tmux 창 3 (adapter) — vLLM 뜬 뒤
+conda activate cctv && cd ~/Smart-Security-Camera-System/server && CUDA_VISIBLE_DEVICES=1 uvicorn app:app --host 0.0.0.0 --port 8010
+# 3) 확인 — "status":"ok","vllm":true 여야 함. "degraded"면 vLLM이 아직/안 떠 있음
+curl localhost:8010/health
+```
+끄는 순서는 반대(어댑터 Ctrl+C → vLLM Ctrl+C). 어댑터만 살아 있고 vLLM이 죽으면 /describe가 502를 내고 클라이언트 로그는 "움직임 감지됨" 폴백으로 남는다.
 
 ### HuggingFace 캐시 (`~/.cache/huggingface/hub/`)
 `Qwen/Qwen3-8B`, `Qwen/Qwen3-VL-32B-Instruct`, `Qwen/Qwen3-VL-8B-Instruct`, `BAAI/bge-m3`(어댑터 임베딩용, `pytorch_model.bin`만 존재 — safetensors 없음).
@@ -243,7 +258,7 @@ test 798 클립에 로그 생성 → `eval/<이름>.jsonl`(클립별 예측·raw
 3. 어댑터 서버는 tmux 안에서 실행. 확인: 노트북에서 `curl http://localhost:8010/health`.
 
 ### 6.1 `server/app.py` → 얇은 어댑터로 교체 — **완료 (2026-11-10)**
-- 리포는 서버에 `~/Smart-Security-Camera-System`로 clone 됨. `server/app.py`, `server/requirements.txt`, `README.md`(서버 절·API 표·트러블슈팅) 수정. **아직 commit/push 안 함** — 노트북에서 이어 쓰려면 먼저 서버에서 commit·push.
+- 리포는 서버에 `~/Smart-Security-Camera-System`로 clone 됨. `server/app.py`, `server/requirements.txt`, `README.md`(서버 절·API 표·트러블슈팅) 수정. 커밋·푸시 완료(37c8a15). 이후 커밋: 47890b6(CLAUDE.md), b9bcb6c(클라이언트 6.2~6.4), 089f1fa(ingest_video.py). **git은 공용 계정이라 `gituser 2dolzzin`으로 신원을 켜고 커밋한다**(`~/.git-identity.sh`). 2dolzzin SSH 키는 암호가 걸려 있어 push는 사용자가 터미널에서 직접(`gituser 2dolzzin && git push`). Claude 세션은 비대화형이라 push 불가.
 - env `cctv`에서 실행. 추가 설치 없음(fastapi·uvicorn·python-multipart·cv2·requests 이미 있었음). bge-m3는 **sentence-transformers 없이 transformers `AutoModel`로 직접**(CLS 토큰 + L2 정규화 = 공식 dense 임베딩, 1024차원). env 보호 목적.
 - `POST /describe`: mp4 → 순차 디코드하며 `WINDOW_SEC`(기본 **20초**) 창으로 분할 → 창마다 make_clips.py와 같은 규칙(160×120 gray absdiff, 8등분 빈별 최대 변화 프레임, 프레임 8장 미만이면 반복으로 채움) → vLLM :8002에 convert_lf.py의 INSTRUCTION 그대로(temperature 0, max_tokens 400) → `re.search(r"\{.*\}")` 파싱 + 열거형 정규화 → `summary + " " + action` bge-m3 임베딩. 3초 미만 꼬리 창은 앞 창에 합침. `question`은 받기만 하고 무시(학습 프롬프트 고정). 선택 `window_sec`(3~120)로 창 길이 덮어쓰기.
 - 반환: `{"description": 첫 로그 summary, "logs": [{"window_start","window_end","log":{…}|null,"raw","embedding":[1024]|null}], "duration_sec","n_windows","window_sec","elapsed_sec"}`.
@@ -251,6 +266,7 @@ test 798 클립에 로그 생성 → `eval/<이름>.jsonl`(클립별 예측·raw
 - 실측: 창당 약 2초(창을 순차 처리). 57초 영상 20초 창 3개 = 5.9초, 164초 영상 60초 창 3개 = 10.7초. 2초짜리(8프레임) 영상도 정상 동작. 깨진 파일은 400, vLLM 다운은 502. 360p·4fps 다운샘플본도 원본과 같은 결과.
 - **창 길이 발견**: 60초 창으로 넣으면 Robbery050(사건 14~56초)·Fighting003(64~102초)·Shoplifting001(25~46, 58~74초) 모두 **정상**으로 놓침. 20초 창에서는 셋 다 해당 구간에서 검출(Robbery / Fighting / Robbery→Shoplifting). 정상 영상 2편(Normal_027, 246) 20초 창 17개 오탐 0. RoadAccidents001은 60초(45초 영상 1창)에서도 검출되나 20초 창에선 유형이 Arson/Assault/Arrest로 흔들림(이상 판정은 유지). → 기본 20초 채택. 클라이언트 녹화가 길면 창 수만큼 시간 걸리므로 `VLM_TIMEOUT` 상향 필요(창당 2초).
 - 어댑터 로그는 tmux 창 `adapter`. 테스트용 다운샘플 클립은 세션 scratchpad에만 있음(임시).
+- 실제 노트북 웹캠 요청 1건 성공 기록(2026-11-10 06:40): 38.1초 녹화 → 창 2개, '복도에서 검은색 상의를 입은 사람이 지나감', 3.0초.
 
 ### 6.2 `client/backend/database.py`, `ai_describer.py` — **완료 (2026-11-10, 서버에서 구현·테스트)**
 - `motion_logs`에 열 추가: `window_start`, `window_end`(녹화 내 초), `is_anomaly`(0/1), `anomaly_type`, `scene`, `action`, `objects_json`, `summary`, `embedding`(BLOB float32×1024). `description`에는 `summary`(기존 UI 호환). 기존 DB는 `init_db()`가 `PRAGMA table_info`로 보고 없는 열만 `ALTER TABLE ADD COLUMN` → 노트북의 옛 `cctv.db` 그대로 써도 됨.
@@ -272,10 +288,17 @@ test 798 클립에 로그 생성 → `eval/<이름>.jsonl`(클립별 예측·raw
 - `PlaybackPage.jsx`: "구간 로그" 목록에 배지 + 창 시각(`m:ss–m:ss`), 클릭하면 해당 창으로 seek. `api/index.js`: `getLogs(period, anomalyOnly, type)`, `searchLogs(q, period, anomalyOnly, topK)`.
 - `index.css` 끝에 스타일 추가. `npm run build` 통과. **실제 화면은 아직 아무도 안 봄** — 노트북에서 `npm run dev`로 확인하고 어색한 곳 손볼 것.
 
-### 6.6 노트북에서 할 일 (남음)
-1. `git pull` → `client/backend`: `pip install -r requirements.txt`(numpy 추가됨) → `VLM_SERVER_URL=http://localhost:8010`(터널) 또는 `http://172.29.55.2:8010`(LAN)으로 `uvicorn main:app --port 8800` → `client/frontend`: `npm run dev`.
-2. 웹캠 앞에서 움직여 세션 1개 만들고 `/logs`에 창 로그가 뜨는지, 클릭 시 해당 창으로 seek 되는지, 검색이 되는지 확인. 백엔드 콘솔 `[VLM] 응답: 창 N개, 이상 M개` 로그 확인.
-3. 실내 고정 카메라에서 모델 결과(도메인 갭) 관찰 → 5단계.
+### 6.6 노트북 세팅 — **완료 (2026-11-10)**
+- 노트북: MacBook Pro(zsh), 리포 `/Users/cheoljin/Desktop/Smart-Security-Camera-System`. **venv는 리포 루트**에 만들었음(`source venv/bin/activate` 후 `cd client/backend`). 처음에 venv에 패키지를 안 깔아 `uvicorn: command not found`가 났었음 → `pip install -r requirements.txt`로 해결.
+- 서버 접속: 노트북(172.23.14.90)과 서버(172.29.55.2)가 같은 내부망. 터널 `ssh -N -L 8010:localhost:8010 hail@172.29.55.2` + `VLM_SERVER_URL=http://localhost:8010`. 공인 IP는 220.149.241.201이나 외부 22번 개방 여부 미확인.
+- 실행: 백엔드 `export VLM_SERVER_URL=http://localhost:8010; uvicorn main:app --port 8800`, 프론트 `npm run dev` → http://localhost:5173.
+- **웹캠 → 녹화 → 서버 → 창 로그 end-to-end 1회 성공.** 다만 그 직후 서버 창에서 Ctrl+C로 vLLM이 꺼져 이후 요청은 폴백. UI(배지·검색·마커)를 실제 화면에서 눈으로 본 건 아직 아님.
+
+### 6.7 임의 영상으로 테스트하는 법 (사용자 질문에 답한 것)
+1. **모델만**: 서버에서 `curl -F file=@영상.mp4 http://localhost:8010/describe` (창 길이 바꾸려면 `-F window_sec=10`).
+2. **카메라 대신 영상 재생**: 노트북 백엔드를 `CAMERA_SOURCE=/경로/영상.mp4`로 실행. 계속 움직이는 영상은 세션이 안 끝나므로 /settings 대기 시간을 3초로.
+3. **녹화된 것처럼 바로 등록**: `client/backend/ingest_video.py` (2026-11-10 추가). 감지 단계 없이 recordings/에 복사·DB 등록·VLM 로그 생성 → /logs, /playback에 바로 보임.
+   `VLM_SERVER_URL=http://localhost:8010 python ingest_video.py a.mp4 b.mp4 [--at "2026-11-10 14:30:00"] [--no-copy]`. 서버에서 Fighting003로 테스트: 창 6개 생성(전부 정상 — 320×240·3.75fps 입력에서는 60~80초 싸움 구간을 놓침. 6.5 저해상도 민감 참고). 브라우저 재생은 H.264 mp4여야 함.
 
 ### 6.5 전처리
 360p·4fps `_vlm.mp4`에서 8장 뽑으면 됨. 학습 데이터가 320×240이라 해상도 적합. 단 6.2의 두 가지 수정(실제 fps 기록, 최소 높이 240)은 필요했음. 관찰: 같은 Robbery050이라도 입력이 480×360·4fps(ffmpeg)면 20~40초 창이 Robbery로 검출됐고, 320×240·3.75fps(preprocess 경유)면 정상으로 나옴 — 저해상도·저fps에 민감. 노트북 녹화는 1280×720→640×360이라 전자에 가까움.
@@ -302,6 +325,8 @@ test 798 클립에 로그 생성 → `eval/<이름>.jsonl`(클립별 예측·raw
 - `CUDA_VISIBLE_DEVICES=N`은 명령과 같은 줄에.
 - 학습 전 `grep output_dir train_lora.yaml`로 덮어쓰기 방지.
 - make_clips 재실행 후 teacher_logs → convert_lf 순서를 건너뛰면 convert가 옛 데이터로 돌아감(실제 발생). `wc -l clips/teacher_logs.jsonl`과 `wc -l clips/manifest.csv`(헤더 +1)가 맞는지 확인.
+- `tmux send-keys`로 `{"image":8}`가 든 명령을 보내면 중괄호를 tmux가 명령 블록으로 해석해 아무것도 안 쳐진다("not in a mode" 에러). `send-keys -l '<문자열>'` 뒤에 `send-keys Enter` 따로.
+- vLLM·어댑터가 도는 tmux 창에서 명령 치면 서버가 죽는다(두 번 발생). 작업은 창 0·2에서.
 - `hf download BAAI/bge-m3 --include ...`는 model.safetensors가 없어서(이 리포는 `pytorch_model.bin`만 배포) 조용히 아무것도 안 받음. 파일명을 직접 지정해 `pytorch_model.bin`을 받을 것. transformers 5.20에서 .bin 로딩 정상.
 - 디스크: 1.2 TB → 914 GB로 예상보다 150 GB 더 줄었음. 원인 미확인(`du -sh ~/.cache/vllm ~/anaconda3/envs/* ~/Videos/*` 로 확인 가능). 급하지 않음.
 
@@ -325,5 +350,5 @@ clips/teacher_logs.jsonl
 lf/train_lora.yaml, lf/merge_lora.yaml, lf/data/, lf/saves/, lf/models/
 eval/*.jsonl, eval/*_metrics.json
 UCF_Crime/, UCF_Crime_raw/, Surveillance-Video-Understanding/
-~/Smart-Security-Camera-System/   캡스톤 리포 clone. server/ 어댑터 + client/ 6.2~6.4 구현. client/backend/venv, cctv.db, recordings/(테스트용 UCF 2편)는 gitignore
+~/Smart-Security-Camera-System/   캡스톤 리포 clone. server/ 어댑터 + client/ 6.2~6.4 + ingest_video.py. client/backend/venv, cctv.db, recordings/(테스트용 UCF 영상)는 gitignore
 ```
