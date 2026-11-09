@@ -216,7 +216,8 @@ curl http://localhost:8800/                # 클라이언트 백엔드
 | 변수 | 설명 | 기본값 |
 |------|------|--------|
 | `VLM_SERVER_URL` | VLM 어댑터 서버 주소 (예: `http://localhost:8010` 터널, `http://172.29.55.2:8010` LAN). 비어 있으면 VLM 호출 생략, 로그 설명은 `"움직임 감지됨"` | (없음) |
-| `VLM_TIMEOUT` | VLM 서버 응답 대기 시간(초) | `60` |
+| `VLM_TIMEOUT` | VLM 서버 응답 대기 시간(초). 서버는 20초 창당 약 2초 걸리므로 긴 녹화면 창 수 × 2초 이상 | `300` |
+| `VLM_WINDOW_SEC` | 서버 창 길이 덮어쓰기(3~120초). 비우면 서버 기본 20초 | (없음) |
 | `VLM_QUESTION` | (구버전 호환) 서버가 받기만 하고 무시함 — LoRA 학습 프롬프트를 그대로 써야 하기 때문 | (없음) |
 | `CAMERA_SOURCE` | 테스트용 입력 영상 경로(또는 RTSP URL 등). 파일이면 끝까지 가면 반복 재생. 미지정 시 웹캠 | (없음) |
 
@@ -272,7 +273,8 @@ uvicorn main:app --port 8800
 | GET | `/api/recordings/{id}` | 녹화 상세 + 연결된 움직임 로그 |
 | GET | `/api/recordings/{id}/video` | 영상 파일 스트리밍 (HTTP Range 완전 지원 → seek 가능) |
 | DELETE | `/api/recordings/{id}` | 영상·DB·연결 로그·부산물(`_raw.mp4`/`_vlm.mp4`) 일괄 삭제 |
-| GET | `/api/logs` | 움직임 로그 목록 (`?period=day\|week\|month`) |
+| GET | `/api/logs?period=day\|week\|month&anomaly=1&type=Robbery` | 창 단위 로그 목록. `anomaly=1` 이상만, `type` 유형 필터. 각 로그에 `window_start/window_end`, `is_anomaly`, `anomaly_type`, `scene`, `action`, `objects`, `summary` |
+| GET | `/api/logs/search?q=<자연어>&period=month&anomaly=1&top_k=20` | 자연어 검색. 질의를 VLM 서버 `/embed`로 임베딩 → SQLite 로그 임베딩과 코사인 유사도 상위 N (`score` 포함) |
 | GET | `/api/logs/{id}` | 로그 상세 (연결 녹화 정보 포함) |
 | GET | `/api/settings` | 런타임 설정 + 허용 범위 |
 | PUT | `/api/settings` | 설정 변경 (`{"silence_sec": 45}`) — 즉시 반영 |

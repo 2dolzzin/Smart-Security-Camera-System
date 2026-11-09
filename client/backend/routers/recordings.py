@@ -17,6 +17,7 @@ from database import (
     get_recordings,
     get_recording_by_id,
     get_connection,
+    get_motion_logs_by_recording,
     delete_recording as db_delete_recording,
 )
 
@@ -44,16 +45,9 @@ def get_recording(recording_id: int):
     if not row:
         raise HTTPException(status_code=404, detail="녹화를 찾을 수 없습니다.")
 
-    conn = get_connection()
-    logs = conn.execute(
-        "SELECT * FROM motion_logs WHERE recording_id=? ORDER BY detected_at",
-        (recording_id,)
-    ).fetchall()
-    conn.close()
-
     return {
         "recording": row,
-        "motion_logs": [dict(l) for l in logs],
+        "motion_logs": get_motion_logs_by_recording(recording_id),
     }
 
 

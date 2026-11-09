@@ -1,5 +1,6 @@
 import { useRef, useEffect, useState } from 'react'
 import { getVideoUrl } from '../api'
+import { anomalyLabel } from '../anomaly'
 
 export default function VideoPlayer({ recordingId, motionLogs = [], startOffset = 0 }) {
   const videoRef = useRef(null)
@@ -72,22 +73,30 @@ export default function VideoPlayer({ recordingId, motionLogs = [], startOffset 
             style={{ width: duration ? `${(currentTime / duration) * 100}%` : '0%' }}
           />
           {/* 움직임 마커 */}
-          {motionLogs.map(log => (
-            <div
-              key={log.id}
-              className="motion-marker"
-              title={log.description || '움직임 감지'}
-              style={{
-                left: duration
-                  ? `${(log.timestamp_offset_sec / duration) * 100}%`
-                  : '0%',
-              }}
-              onClick={e => {
-                e.stopPropagation()
-                if (videoRef.current) videoRef.current.currentTime = log.timestamp_offset_sec
-              }}
-            />
-          ))}
+          {motionLogs.map(log => {
+            const start = log.window_start ?? log.timestamp_offset_sec ?? 0
+            const end = log.window_end
+            const label = (log.is_anomaly ? `[이상 · ${anomalyLabel(log.anomaly_type)}] ` : '[정상] ')
+              + (log.summary || log.description || '움직임 감지')
+            return (
+              <div
+                key={log.id}
+                className={`motion-marker ${log.is_anomaly ? 'anomaly' : 'normal'}`}
+                title={label}
+                style={{
+                  left: duration ? `${(start / duration) * 100}%` : '0%',
+                  // 창 구간이 있으면 마커를 구간 길이만큼 늘림
+                  ...(end != null && duration
+                    ? { width: `${Math.max(1.5, ((end - start) / duration) * 100)}%`, borderRadius: 4, transform: 'translateY(-50%)' }
+                    : {}),
+                }}
+                onClick={e => {
+                  e.stopPropagation()
+                  if (videoRef.current) videoRef.current.currentTime = start
+                }}
+              />
+            )
+          })}
         </div>
         <div className="timeline-time">
           <span>{fmtTime(currentTime)}</span>

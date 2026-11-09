@@ -3,6 +3,7 @@ import { useStore } from '../store'
 import { getRecordings, getRecording, deleteRecording } from '../api'
 import VideoPlayer from '../components/VideoPlayer'
 import dayjs from 'dayjs'
+import { anomalyLabel, fmtWindow } from '../anomaly'
 
 export default function PlaybackPage() {
   const [selectedDate, setSelectedDate] = useState(dayjs().format('YYYY-MM-DD'))
@@ -163,17 +164,33 @@ export default function PlaybackPage() {
           {selectedRec?.motion_logs?.length > 0 && (
             <div className="motion-summary">
               <div className="motion-summary-title">
-                움직임 감지 구간
-                <span className="rec-count">{selectedRec.motion_logs.length}건</span>
+                구간 로그
+                <span className="rec-count">
+                  {selectedRec.motion_logs.length}건
+                  {selectedRec.motion_logs.some(l => l.is_anomaly) &&
+                    ` · 이상 ${selectedRec.motion_logs.filter(l => l.is_anomaly).length}건`}
+                </span>
               </div>
               <ul className="motion-summary-list">
                 {selectedRec.motion_logs.map(log => (
-                  <li key={log.id} className="motion-summary-item">
+                  <li
+                    key={log.id}
+                    className={`motion-summary-item ${log.is_anomaly ? 'anomaly' : ''}`}
+                    style={{ cursor: 'pointer' }}
+                    title="클릭하면 해당 구간으로 이동"
+                    onClick={() => setStartOffset((log.window_start ?? log.timestamp_offset_sec ?? 0) + 0.001)}
+                  >
                     <span className="motion-time">
                       {fmtDateTime(log.detected_at)}
+                      {log.window_start != null && (
+                        <span className="log-window"> {fmtWindow(log.window_start)}–{fmtWindow(log.window_end)}</span>
+                      )}
                     </span>
+                    {log.is_anomaly
+                      ? <span className="badge badge-anomaly">이상 · {anomalyLabel(log.anomaly_type)}</span>
+                      : <span className="badge badge-normal">정상</span>}
                     <span className="motion-desc">
-                      {log.description || '움직임 감지됨'}
+                      {log.summary || log.description || '움직임 감지됨'}
                     </span>
                   </li>
                 ))}

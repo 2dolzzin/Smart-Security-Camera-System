@@ -1,8 +1,8 @@
 # CCTV VLM 졸업작품 — 작업 기록 및 인계 문서
 
 > 작성일: 2026-11-10. 서버 `hail-pro6000`에서 진행. 이 문서는 Claude Code 세션의 컨텍스트용이다.
-> **연구 파트(데이터 → LoRA → 평가)는 완료. 4단계 중 서버 쪽(6.1 어댑터)도 완료(2026-11-10). 남은 것은 클라이언트 쪽(6.2~6.4, 노트북에서)과 데모·보고서(5단계).**
-> 이 파일은 서버 `~/Videos/CLAUDE.md`. (이전엔 대화에 첨부만 되어 있었고 서버 디스크에는 없었음.)
+> **연구 파트(데이터 → LoRA → 평가) 완료. 4단계 시스템 통합(6.1 서버 어댑터 + 6.2~6.4 클라이언트)도 코드·API 테스트까지 완료(2026-11-10, 서버에서). 남은 것: 노트북에서 실제 카메라로 UI 확인(6.6), 데모·보고서(5단계).**
+> 이 파일은 서버 `~/Videos/CLAUDE.md`이고, 리포 루트 `CLAUDE.md`에 복사본을 커밋한다(노트북에서 Claude Code가 읽도록). 둘 중 하나 고치면 다른 쪽도 맞출 것.
 
 ---
 
@@ -252,24 +252,33 @@ test 798 클립에 로그 생성 → `eval/<이름>.jsonl`(클립별 예측·raw
 - **창 길이 발견**: 60초 창으로 넣으면 Robbery050(사건 14~56초)·Fighting003(64~102초)·Shoplifting001(25~46, 58~74초) 모두 **정상**으로 놓침. 20초 창에서는 셋 다 해당 구간에서 검출(Robbery / Fighting / Robbery→Shoplifting). 정상 영상 2편(Normal_027, 246) 20초 창 17개 오탐 0. RoadAccidents001은 60초(45초 영상 1창)에서도 검출되나 20초 창에선 유형이 Arson/Assault/Arrest로 흔들림(이상 판정은 유지). → 기본 20초 채택. 클라이언트 녹화가 길면 창 수만큼 시간 걸리므로 `VLM_TIMEOUT` 상향 필요(창당 2초).
 - 어댑터 로그는 tmux 창 `adapter`. 테스트용 다운샘플 클립은 세션 scratchpad에만 있음(임시).
 
-### 6.2 `client/backend/database.py`, `ai_describer.py`
-- (노트북에서) `motion_logs`에 열 추가: `is_anomaly`(0/1), `anomaly_type`, `scene`, `action`, `objects_json`, `summary`, `embedding`(BLOB, float32 bytes). `description`에는 `summary`를 넣어 기존 UI 호환.
-- 녹화 1개 → 로그 N개(20초 창)가 되므로 `motion_logs`에 `window_start`, `window_end`(초) 추가. recordings↔motion_logs가 이미 분리돼 있어 큰 수술 아님.
-- `ai_describer.py`: 응답의 `logs[]`를 순회하며 로그 N개 insert(`log`가 null인 창은 raw만 남기거나 건너뜀). 서버 연결 실패 시 기존 폴백(`"움직임 감지됨"`) 유지. `VLM_TIMEOUT` 기본 60초는 창당 2초 × 창 수 + 업로드면 보통 충분하지만 10분 녹화(30창)면 늘려야 함.
-- 기존 DB 마이그레이션은 `ALTER TABLE ... ADD COLUMN` 또는 초기화(`cctv.db*` 삭제 후 재생성).
+### 6.2 `client/backend/database.py`, `ai_describer.py` — **완료 (2026-11-10, 서버에서 구현·테스트)**
+- `motion_logs`에 열 추가: `window_start`, `window_end`(녹화 내 초), `is_anomaly`(0/1), `anomaly_type`, `scene`, `action`, `objects_json`, `summary`, `embedding`(BLOB float32×1024). `description`에는 `summary`(기존 UI 호환). 기존 DB는 `init_db()`가 `PRAGMA table_info`로 보고 없는 열만 `ALTER TABLE ADD COLUMN` → 노트북의 옛 `cctv.db` 그대로 써도 됨.
+- 흐름: 세션 종료 시 만들어 둔 로그 행 1개 → `describe_recording()`이 어댑터 응답 `logs[]`를 받아 **첫 창은 그 행을 update**(`timestamp_offset_sec`도 창 시작으로), **2번째 창부터 insert**(`detected_at` = 녹화 시작 + 창 시작). 파싱 실패한 창(log null)은 건너뜀. 서버 미설정/실패면 기존 폴백 `"움직임 감지됨"` 단일 로그.
+- `VLM_TIMEOUT` 기본 60 → **300**. 새 env `VLM_WINDOW_SEC`(선택). `embed_text()` 추가(검색용 `/embed` 호출). API 응답에서 `embedding`은 빼고 `objects_json`은 `objects` 리스트로 파싱해 내려줌(`_row_to_log`).
+- `requirements.txt`에 numpy 추가.
+- **`preprocess.py` 두 가지 수정**(6.5의 "안 건드려도 됨"과 달리 필요했음): (a) 결과 mp4의 fps를 명목 4가 아니라 실제값(원본fps/round(원본fps/4), 15fps면 3.75)으로 기록 — 안 그러면 재생 시간이 6% 줄어 `window_start`가 원본 시각과 어긋남(57초 영상이 53.2초로 나왔었음). (b) 축소 후 높이가 240 미만이면 축소 안 함(`MIN_HEIGHT`) — 320×240 테스트 영상이 160×120으로 들어가 결과가 흔들림.
 
-### 6.3 `client/backend/routers/logs.py` (노트북)
-- `GET /api/logs?anomaly=1` 필터.
-- `GET /api/logs/search?q=...`: 질의 문장을 서버 `POST {VLM_SERVER_URL}/embed`로 보내 벡터를 받고, SQLite의 `embedding` 열과 코사인 유사도를 **클라이언트에서 numpy로** 계산해 상위 N 반환. 로그 수천 개면 ms 단위라 벡터 DB 불필요. 클라이언트에 모델 없음. (임베딩은 이미 L2 정규화돼 있으므로 내적 = 코사인.)
-- 필드 필터(`is_anomaly`, 시각 범위, objects type)와 결합.
+### 6.3 `client/backend/routers/logs.py` — **완료**
+- `GET /api/logs?period=&anomaly=1&type=Robbery` (유형 목록 외 값은 400). 응답에 `anomaly_total`.
+- `GET /api/logs/search?q=&period=month&anomaly=1&top_k=20`: `/embed`로 질의 벡터 → `database.search_motion_logs()`가 numpy 내적(bge-m3는 L2 정규화돼 있어 내적=코사인) → `score` 포함 상위 N. `VLM_SERVER_URL` 없으면 503, 임베딩 실패 502. `/search` 라우트는 `/{log_id}`보다 **앞에** 선언해야 함(안 그러면 "search"를 int로 파싱하려다 422).
+- `routers/recordings.py`의 `GET /api/recordings/{id}`도 `motion_logs`를 `_row_to_log`로 내려줌(창 순 정렬).
+- 테스트(서버, Robbery050·Normal_027을 녹화로 가장해 삽입): 로그 12개(3창+9창) 생성, `anomaly=1`·`type=` 필터, 검색 3질의 모두 의미 맞는 창이 1위(예: "가방을 들고 나감" → 해당 창 0.663), 녹화 상세에 창 9개, 비디오 Range 206 정상.
 
-### 6.4 `client/frontend`
-- `LogPage.jsx` / `MotionLogList.jsx`: 이상 로그 빨간 배지 + `anomaly_type` 표시, "이상만 보기" 토글, 상단 고정, 자연어 검색창(→ `/api/logs/search`).
-- 기존 "로그 클릭 → 해당 녹화 재생"은 그대로. 창 단위 로그면 `window_start`로 seek.
-- `/playback` 타임라인의 움직임 마커를 이상 여부로 색 구분.
+### 6.4 `client/frontend` — **완료 (빌드 통과, 브라우저 확인은 노트북에서)**
+- `src/anomaly.js`: 유형 영문→한국어(`ANOMALY_LABELS`), `fmtWindow`.
+- `MotionLogList.jsx`: 자연어 검색창(→ `/api/logs/search`, 유사도순 + `score` 배지), "이상만 보기" 토글(빨강, 건수 표시), 이상 로그 빨간 배지 `이상 · 강도` + 왼쪽 빨간 테두리 + **상단 고정**(검색 결과는 유사도순 그대로), 정상은 초록 배지, `scene` 배지, `summary` 아래 `action` 한 줄, 시각 아래 `+m:ss` 창 오프셋. 클릭 → `/playback`으로 `window_start` seek.
+- `VideoPlayer.jsx`: 타임라인 마커를 창 길이만큼 막대로, 이상=빨강 / 정상=파랑, 툴팁에 `[이상 · 유형] summary`.
+- `PlaybackPage.jsx`: "구간 로그" 목록에 배지 + 창 시각(`m:ss–m:ss`), 클릭하면 해당 창으로 seek. `api/index.js`: `getLogs(period, anomalyOnly, type)`, `searchLogs(q, period, anomalyOnly, topK)`.
+- `index.css` 끝에 스타일 추가. `npm run build` 통과. **실제 화면은 아직 아무도 안 봄** — 노트북에서 `npm run dev`로 확인하고 어색한 곳 손볼 것.
 
-### 6.5 (주의) 전처리는 안 건드려도 됨
-360p·4fps `_vlm.mp4`에서 8장 뽑으면 됨. 학습 데이터가 320×240이라 해상도 적합. 실제로 Robbery050 원본과 360p·4fps본의 로그가 사실상 같았음.
+### 6.6 노트북에서 할 일 (남음)
+1. `git pull` → `client/backend`: `pip install -r requirements.txt`(numpy 추가됨) → `VLM_SERVER_URL=http://localhost:8010`(터널) 또는 `http://172.29.55.2:8010`(LAN)으로 `uvicorn main:app --port 8800` → `client/frontend`: `npm run dev`.
+2. 웹캠 앞에서 움직여 세션 1개 만들고 `/logs`에 창 로그가 뜨는지, 클릭 시 해당 창으로 seek 되는지, 검색이 되는지 확인. 백엔드 콘솔 `[VLM] 응답: 창 N개, 이상 M개` 로그 확인.
+3. 실내 고정 카메라에서 모델 결과(도메인 갭) 관찰 → 5단계.
+
+### 6.5 전처리
+360p·4fps `_vlm.mp4`에서 8장 뽑으면 됨. 학습 데이터가 320×240이라 해상도 적합. 단 6.2의 두 가지 수정(실제 fps 기록, 최소 높이 240)은 필요했음. 관찰: 같은 Robbery050이라도 입력이 480×360·4fps(ffmpeg)면 20~40초 창이 Robbery로 검출됐고, 320×240·3.75fps(preprocess 경유)면 정상으로 나옴 — 저해상도·저fps에 민감. 노트북 녹화는 1280×720→640×360이라 전자에 가까움.
 
 ---
 
@@ -316,5 +325,5 @@ clips/teacher_logs.jsonl
 lf/train_lora.yaml, lf/merge_lora.yaml, lf/data/, lf/saves/, lf/models/
 eval/*.jsonl, eval/*_metrics.json
 UCF_Crime/, UCF_Crime_raw/, Surveillance-Video-Understanding/
-~/Smart-Security-Camera-System/   캡스톤 리포 clone (server/app.py = 어댑터, README 수정, 미커밋)
+~/Smart-Security-Camera-System/   캡스톤 리포 clone. server/ 어댑터 + client/ 6.2~6.4 구현. client/backend/venv, cctv.db, recordings/(테스트용 UCF 2편)는 gitignore
 ```
