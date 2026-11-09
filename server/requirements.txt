@@ -1,16 +1,14 @@
-# VLM 서버(AWS GPU 인스턴스)에서 설치.
-# torch / transformers / accelerate / qwen-vl-utils 는 보통 이미 깔려 있으므로
-# 버전 충돌이 걱정되면 아래 3개(API 서버용)만 설치해도 됨:
+# VLM 어댑터 서버(GPU 서버, conda env `cctv`)에서 설치.
+# vLLM(0.33)이 이미 깔린 env라면 torch/transformers/requests/opencv/numpy는 이미 있으므로
+# 아래 API 서버용 3개만 추가하면 된다:
 #   pip install fastapi "uvicorn[standard]" python-multipart
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
-python-multipart==0.0.12
-
-# 추론 스택 (이미 설치돼 있으면 생략 가능)
+fastapi
+uvicorn[standard]
+python-multipart
+requests
+numpy
+opencv-python-headless
+# bge-m3 임베딩 (transformers AutoModel로 직접 로드 — sentence-transformers 불필요)
 torch
-transformers>=4.49.0
-accelerate
-qwen-vl-utils
-# 영상 디코딩 백엔드 (process_vision_info 가 video 처리 시 필요)
-torchvision
-av
+transformers
+# 모델 서버는 별도 프로세스: pip install vllm==0.33.0  (CLAUDE.md 참고)

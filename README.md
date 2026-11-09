@@ -3,7 +3,8 @@
 로컬 CCTV/웹캠 영상에서 **움직임 구간만 자동으로 녹화**하고, 그 구간을 **자체 호스팅 VLM**으로 한국어로 설명·로그화하는 시스템입니다.
 
 - 항상 켜져 있고, 사람이 영상을 통째로 다시 볼 필요 없이 **이벤트(움직임)별 짧은 클립 + 한 줄 설명**만 쌓입니다.
-- VLM은 외부 API가 아니라 **AWS GPU 인스턴스에 직접 띄운 Qwen2.5-VL-3B** — 비용·프라이버시 부담 없음.
+- VLM은 외부 API가 아니라 **자체 GPU 서버(`hail-pro6000`)에 띄운 Qwen3-VL-8B LoRA 모델**(vLLM) — 비용·프라이버시 부담 없음.
+- 졸업작품에서 VLM 출력을 한 줄 설명 → **구조화 JSON 로그(장소·객체·행동·이상여부·이상유형·요약)**로 바꾸고, 로그 임베딩(bge-m3)으로 자연어 검색을 붙임.
 
 ---
 
@@ -28,9 +29,9 @@
               │ POST /describe (다운샘플 mp4 업로드)
               ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│             server/ (AWS GPU 인스턴스 · A10G)                        │
-│             FastAPI + Qwen2.5-VL-3B-Instruct                        │
-│             영상 → 한국어 설명 1문장                                  │
+│   server/ (GPU 서버 hail-pro6000 · RTX PRO 6000 ×3)                 │
+│   app.py (FastAPI 어댑터 :8010) ──▶ vLLM Qwen3-VL-8B-cctv (:8002)   │
+│   영상 → 20초 창마다 8프레임 → 구조화 JSON 로그 + bge-m3 임베딩      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -41,7 +42,7 @@
 3. **세션 녹화** (`MotionSession`) — 움직임 감지되면 녹화 시작 → 움직임이 이어지면 타이머 리셋 → **마지막 움직임 후 N초간 정적**이면 세션 종료 (N은 `/settings`에서 변경)
 4. **영상 마무리** — `recorder`가 백그라운드 스레드에서 mp4 최종화 (avc1 코덱 가능하면 직접 저장, 아니면 mp4v로 받아 FFmpeg `-c copy`로 브라우저 호환 mp4로 remux)
 5. **전처리** — `preprocess.downsample_video`가 그 mp4를 **해상도 1/2(→360p) + 4fps**로 다운샘플 (같은 폴더에 `..._vlm.mp4` 로 보관)
-6. **VLM 호출** — `ai_describer`가 그 작은 mp4를 `POST {VLM_SERVER_URL}/describe`로 업로드 → Qwen2.5-VL이 한국어 한 줄 설명 반환
+6. **VLM 호출** — `ai_describer`가 그 작은 mp4를 `POST {VLM_SERVER_URL}/describe`로 업로드 → 서버가 20초 창마다 변화량 기준 8프레임을 뽑아 LoRA 모델에 넣고 **구조화 JSON 로그 + 임베딩**(`logs[]`)을 반환. `description`(첫 로그 summary)은 하위호환용
 7. **로그 기록** — `motion_logs.description` 업데이트 → 프론트 `/logs`·`/playback` 타임라인에 표시
 8. **자동 정리** — 30일 지난 녹화·로그·`_vlm.mp4`는 매일 자정 자동 삭제
 
@@ -53,9 +54,9 @@
 |------|------|
 | Frontend | React 18, React Router v6, Zustand, Axios, dayjs, Vite |
 | Backend (Client) | Python 3.11+, FastAPI, OpenCV, SQLite (WAL), APScheduler, httpx |
-| VLM Server | Python 3.11+, FastAPI, PyTorch, Transformers, **Qwen2.5-VL-3B-Instruct**, `qwen-vl-utils` |
+| VLM Server | Python 3.12, FastAPI(어댑터), **vLLM 0.33 + Qwen3-VL-8B-Instruct LoRA(자체 학습, UCF-Crime/UCA)**, OpenCV(프레임 추출), Transformers(**BAAI/bge-m3** 임베딩) |
 | 영상 저장·변환 | FFmpeg (mp4 remux), 로컬 파일시스템 |
-| 인프라 | AWS EC2 (예: `g5.xlarge` / NVIDIA A10G 24GB) |
+| 인프라 | 연구실 GPU 서버 `hail-pro6000` (RTX PRO 6000 Blackwell 96GB ×3). 클라이언트는 SSH 터널 또는 LAN으로 접속 |
 
 ---
 
@@ -101,8 +102,8 @@ cctv-final/
 │       ├── vite.config.js          # /api·/ws → http://localhost:8800 프록시
 │       └── package.json
 │
-└── server/                         ← AWS GPU 인스턴스용 VLM API 서버
-    ├── app.py                      # POST /describe (영상 업로드 → 한국어 설명)
+└── server/                         ← GPU 서버용 VLM 어댑터 (vLLM 앞단)
+    ├── app.py                      # POST /describe (영상 → 창별 JSON 로그 + 임베딩), POST /embed, GET /health
     └── requirements.txt
 ```
 
@@ -112,31 +113,36 @@ cctv-final/
 
 총 3개 컴포넌트를 띄웁니다. 처음 한 번만 설치, 그 뒤로는 실행만.
 
-### 1. VLM 서버 (AWS GPU 인스턴스)
+### 1. VLM 서버 (GPU 서버 `hail-pro6000`)
 
-GPU(예: A10G) + NVIDIA 드라이버가 설치된 Ubuntu 인스턴스에서.
+서버에는 리포의 `server/`만 있으면 된다 (`~/Smart-Security-Camera-System`). conda env `cctv`(vLLM 0.33) 사용.
+모델 학습·데이터 파이프라인은 `~/Videos/CLAUDE.md` 참고.
 
 ```bash
-# 0) GPU·드라이버 확인 — NVIDIA-SMI 표가 나와야 함
+# 0) 빈 GPU 확인 (유령 서버가 남아 있을 수 있음)
 nvidia-smi
 
-# 1) ~/qwen 에 server/app.py, server/requirements.txt 를 복사
-#    (로컬에서 scp 또는 VSCode Remote-SSH)
+# 1) tmux 안에서 vLLM 모델 서버 (LoRA 병합 모델, 서버 내부 전용 :8002)
+conda activate cctv
+CUDA_VISIBLE_DEVICES=1 vllm serve ~/Videos/lf/models/qwen3vl8b-cctv --port 8002 \
+    --max-model-len 8192 --limit-mm-per-prompt '{"image":8}' --gpu-memory-utilization 0.8
 
-# 2) torch / transformers / qwen-vl-utils 가 설치된 환경 활성화 (예: conda env)
-conda activate qwen
-pip install fastapi "uvicorn[standard]" python-multipart
+# 2) 다른 tmux 창에서 어댑터 (:8010). bge-m3는 vLLM과 같은 GPU에 올려도 됨(~1.2 GB)
+cd ~/Smart-Security-Camera-System/server
+CUDA_VISIBLE_DEVICES=1 uvicorn app:app --host 0.0.0.0 --port 8010
+#   SSH 터널로만 접속할 거면 --host 127.0.0.1
 
-# 3) 실행 — 외부 접속용으로 0.0.0.0
-cd ~/qwen
-uvicorn app:app --host 0.0.0.0 --port 8001
+# 3) 확인
+curl http://localhost:8010/health
+curl -F file=@~/Videos/UCF_Crime/Robbery/Robbery050_x264.mp4 http://localhost:8010/describe
 ```
 
-`[VLM] 모델 로딩 완료` → `Uvicorn running on http://0.0.0.0:8001` 이 뜨면 정상. 모델은 서버 켤 때 한 번만 GPU에 적재되고, 요청마다 재로딩하지 않음. 가중치는 첫 실행 시 HuggingFace에서 받아 `~/.cache/huggingface/`에 영구 저장됨.
+`/health`가 `{"status":"ok","vllm":true,...,"embed_ready":true}` 면 정상. `"status":"degraded"`면 vLLM(:8002)이 안 떠 있는 것.
 
-**AWS 보안그룹 인바운드에 TCP 8001 허용** (Source는 가능하면 클라이언트 PC IP만, 데모면 `0.0.0.0/0`).
-
-SSH 끊겨도 살리고 싶으면 `tmux new -s vlm` 안에서 실행 후 `Ctrl+b → d`.
+**네트워크 (클라이언트 → 서버 8010)** — AWS 보안그룹 대신:
+- 같은 LAN이면 서버 내부 IP로 직접: `VLM_SERVER_URL=http://<서버IP>:8010` (서버에서 `ip addr`로 확인).
+- 다른 망(학교 NAT 등)이거나 확실치 않으면 **SSH 터널**(권장, 방화벽 설정 불필요). 클라이언트 PC에서
+  `ssh -N -L 8010:localhost:8010 hail@<서버>` 를 열어 두고 `VLM_SERVER_URL=http://localhost:8010`.
 
 ### 2. 백엔드 (클라이언트 PC)
 
@@ -147,8 +153,8 @@ python3 -m venv venv
 source venv/bin/activate                          # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
-# AWS VLM 서버 주소 지정 (uvicorn 과 같은 터미널에서 export)
-export VLM_SERVER_URL="http://<AWS-퍼블릭-IP>:8001"
+# VLM 서버 주소 지정 (uvicorn 과 같은 터미널에서 export). SSH 터널이면 localhost
+export VLM_SERVER_URL="http://localhost:8010"
 
 uvicorn main:app --port 8800
 ```
@@ -169,7 +175,7 @@ npm run dev
 ### 동작 확인 한 줄
 
 ```bash
-curl http://<AWS-퍼블릭-IP>:8001/health    # VLM 서버
+curl http://localhost:8010/health          # VLM 서버 (터널/LAN 주소)
 curl http://localhost:8800/                # 클라이언트 백엔드
 ```
 둘 다 `{"status":"ok", ...}` 나오면 풀스택 OK.
@@ -191,7 +197,7 @@ curl http://localhost:8800/                # 클라이언트 백엔드
 
 - **이벤트 기반 자동 녹화** — 움직임 시작 → 녹화, 마지막 움직임 후 N초 정적이면 종료. 녹화 1개 = 움직임 로그 1개.
 - **이벤트 단위 파일 저장** — `recordings/YYYY-MM-DD/HH-MM-SS.mp4`. 통영상 저장 대비 디스크 사용량 극단적으로 작음.
-- **VLM 한국어 장면 설명** — 녹화 → 전처리(360p·4fps) → AWS Qwen2.5-VL → 짧은 한 문장 → motion_log에 기록 → 프론트에 표시.
+- **VLM 구조화 로그** — 녹화 → 전처리(360p·4fps) → GPU 서버 Qwen3-VL-8B LoRA → 20초 창마다 JSON 로그(장소·객체·행동·이상여부·유형·요약) + 임베딩 → motion_log에 기록 → 프론트에 표시.
 - **로그 클릭 → 영상 점프** — 로그 항목 클릭 시 해당 녹화 자동 재생.
 - **녹화 삭제** — `/playback`에서 영상·DB·연결된 로그·부산물(`_raw.mp4`, `_vlm.mp4`)까지 일괄 삭제.
 - **설정 가능한 침묵 타임아웃** — `/settings`에서 3–600초, DB에 저장되어 즉시 반영(서버 재시작 불필요).
@@ -209,9 +215,9 @@ curl http://localhost:8800/                # 클라이언트 백엔드
 
 | 변수 | 설명 | 기본값 |
 |------|------|--------|
-| `VLM_SERVER_URL` | AWS VLM 서버 주소 (예: `http://1.2.3.4:8001`). 비어 있으면 VLM 호출 생략, 로그 설명은 `"움직임 감지됨"` | (없음) |
+| `VLM_SERVER_URL` | VLM 어댑터 서버 주소 (예: `http://localhost:8010` 터널, `http://172.29.55.2:8010` LAN). 비어 있으면 VLM 호출 생략, 로그 설명은 `"움직임 감지됨"` | (없음) |
 | `VLM_TIMEOUT` | VLM 서버 응답 대기 시간(초) | `60` |
-| `VLM_QUESTION` | VLM에 보낼 질문 텍스트. 비우면 서버 기본 CCTV 프롬프트 사용 | (없음) |
+| `VLM_QUESTION` | (구버전 호환) 서버가 받기만 하고 무시함 — LoRA 학습 프롬프트를 그대로 써야 하기 때문 | (없음) |
 | `CAMERA_SOURCE` | 테스트용 입력 영상 경로(또는 RTSP URL 등). 파일이면 끝까지 가면 반복 재생. 미지정 시 웹캠 | (없음) |
 
 ### VLM 서버 (`server/`)
@@ -271,12 +277,27 @@ uvicorn main:app --port 8800
 | GET | `/api/settings` | 런타임 설정 + 허용 범위 |
 | PUT | `/api/settings` | 설정 변경 (`{"silence_sec": 45}`) — 즉시 반영 |
 
-### VLM 서버 (`http://<AWS-IP>:8001`)
+### VLM 서버 (`http://<서버>:8010`, `server/app.py`)
 
 | Method | Endpoint | 설명 |
 |--------|----------|------|
-| GET | `/health` | `{"status":"ok","model":...,"device":"cuda"}` |
-| POST | `/describe` | multipart: `file=<영상>`, `question=<텍스트 선택>` → `{"description":"...", "elapsed_sec":1.42}` |
+| GET | `/health` | `{"status":"ok|degraded","vllm":bool,"model":...,"embed_model":"BAAI/bge-m3","embed_ready":bool,"window_sec":20}` |
+| POST | `/describe` | multipart: `file=<영상>`, `window_sec=<3~120, 선택>` → 아래 응답 |
+| POST | `/embed` | json `{"text":"..."}` → `{"embedding":[1024 floats]}` (검색 질의용) |
+
+`/describe` 응답:
+```json
+{"description": "<첫 로그의 summary>",
+ "logs": [{"window_start": 0.0, "window_end": 20.0,
+           "log": {"scene": "주차장", "objects": [{"type": "사람", "count": 2, "appearance": "..."}],
+                   "action": "...", "is_anomaly": "정상|이상",
+                   "anomaly_type": "Abuse|Arrest|Arson|Assault|Burglary|Explosion|Fighting|RoadAccidents|Robbery|Shooting|Shoplifting|Stealing|Vandalism|None",
+                   "summary": "..."},
+           "raw": "<모델 원문>", "embedding": [1024 floats]}],
+ "duration_sec": 56.7, "n_windows": 3, "window_sec": 20.0, "elapsed_sec": 5.9}
+```
+영상은 20초 창으로 쪼개 창마다 로그 하나(3초 미만 꼬리는 앞 창에 합침). 파싱 실패한 창은 `log`/`embedding`이 `null`.
+처리 시간은 창당 약 2초(RTX PRO 6000 기준).
 
 ---
 
@@ -340,7 +361,7 @@ python debug.py /path/to/video.mp4 --speed 2
 |------|------|
 | 백엔드 `Address already in use` (8800) | 이전 uvicorn이 남아있음 → `pkill -f "uvicorn main:app"` 후 재실행. 다른 프로세스(VSCode 등)가 잡고 있으면 `lsof -nP -iTCP:8800 -sTCP:LISTEN`로 확인 |
 | 프론트에서 "서버에 연결 중..." 만 계속 | 백엔드 콘솔에 에러 없는지 + `curl http://localhost:8800/` 로 직접 확인 + 브라우저 DevTools `Network`/`Console` 탭 |
-| VLM 호출 시 타임아웃/연결 거부 | ① AWS 보안그룹 인바운드 8001 열려있는지 ② AWS `uvicorn app:app --host 0.0.0.0 ...` 가 살아있는지 ③ `VLM_SERVER_URL` IP가 현재 인스턴스 퍼블릭 IP인지 (stop/start 시 IP 바뀜 — Elastic IP 권장) |
+| VLM 호출 시 타임아웃/연결 거부 | ① SSH 터널(`ssh -N -L 8010:localhost:8010 ...`)이 살아 있는지 ② 서버 tmux에서 어댑터(:8010)와 vLLM(:8002)이 둘 다 떠 있는지 (`curl localhost:8010/health`의 `vllm` 값) ③ 긴 녹화는 창 수만큼 시간이 걸리므로 `VLM_TIMEOUT`을 늘릴 것(창당 ~2초) |
 | 1~2초짜리 짧은 녹화가 잔뜩 생김 | 백엔드가 도중에 재시작되는 중 (`--reload` 가 파일 변화 감지 등). `--reload` 빼고 실행 |
 | 로그에 "움직임 감지됨"만 나오고 실제 설명이 없음 | `VLM_SERVER_URL` 미설정이거나 VLM 호출이 모두 실패하는 상태. 백엔드 콘솔의 `[VLM] ...` 로그 확인 |
 | 영상이 브라우저에서 안 재생됨 | mp4v 코덱으로 저장되고 FFmpeg가 없어 remux 실패한 경우. `brew install ffmpeg` 후 재실행. (avc1을 직접 쓸 수 있는 환경이면 FFmpeg 불필요) |
