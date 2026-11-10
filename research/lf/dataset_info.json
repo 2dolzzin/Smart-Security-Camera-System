@@ -1,0 +1,58 @@
+{
+ "cctv_train": {
+  "file_name": "cctv_train.json",
+  "formatting": "sharegpt",
+  "columns": {
+   "messages": "messages",
+   "images": "images"
+  },
+  "tags": {
+   "role_tag": "role",
+   "content_tag": "content",
+   "user_tag": "user",
+   "assistant_tag": "assistant"
+  }
+ },
+ "cctv_val": {
+  "file_name": "cctv_val.json",
+  "formatting": "sharegpt",
+  "columns": {
+   "messages": "messages",
+   "images": "images"
+  },
+  "tags": {
+   "role_tag": "role",
+   "content_tag": "content",
+   "user_tag": "user",
+   "assistant_tag": "assistant"
+  }
+ },
+ "cctv_test": {
+  "file_name": "cctv_test.json",
+  "formatting": "sharegpt",
+  "columns": {
+   "messages": "messages",
+   "images": "images"
+  },
+  "tags": {
+   "role_tag": "role",
+   "content_tag": "content",
+   "user_tag": "user",
+   "assistant_tag": "assistant"
+  }
+ },
+ "cctv_test_uniform": {
+  "file_name": "cctv_test_uniform.json",
+  "formatting": "sharegpt",
+  "columns": {
+   "messages": "messages",
+   "images": "images"
+  },
+  "tags": {
+   "role_tag": "role",
+   "content_tag": "content",
+   "user_tag": "user",
+   "assistant_tag": "assistant"
+  }
+ }
+}

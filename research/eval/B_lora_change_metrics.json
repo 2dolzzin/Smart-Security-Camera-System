@@ -1,0 +1,29 @@
+{
+ "name": "B_lora_change",
+ "model": "/home/hail/Videos/lf/models/qwen3vl8b-cctv",
+ "frames": "change",
+ "n": 798,
+ "parse_rate": 0.9987468671679198,
+ "acc_parsed": 0.7365119196988708,
+ "acc_all": 0.7355889724310777,
+ "precision": 0.5344827586206896,
+ "recall": 0.6739130434782609,
+ "f1": 0.5961538461538461,
+ "type_acc_on_anomaly": 0.27391304347826084,
+ "recall_per_type": {
+  "Abuse": 0.0,
+  "Arrest": 0.7272727272727273,
+  "Arson": 0.8333333333333334,
+  "Assault": 0.7777777777777778,
+  "Burglary": 0.7352941176470589,
+  "Explosion": 0.875,
+  "Fighting": 0.9,
+  "RoadAccidents": 0.7391304347826086,
+  "Robbery": 0.5,
+  "Shooting": 0.7037037037037037,
+  "Shoplifting": 0.375,
+  "Stealing": 0.6666666666666666,
+  "Vandalism": 0.875
+ },
+ "runtime_s": 171.04416227340698
+}

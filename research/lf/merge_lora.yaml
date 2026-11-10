@@ -1,0 +1,11 @@
+### LoRA 병합 → vLLM 서빙용 단일 모델
+model_name_or_path: Qwen/Qwen3-VL-8B-Instruct
+adapter_name_or_path: saves/qwen3vl8b-lora-r32-hn
+template: qwen3_vl
+finetuning_type: lora
+trust_remote_code: true
+
+export_dir: models/qwen3vl8b-cctv-hn
+export_size: 5
+export_device: cpu
+export_legacy_format: false

@@ -1,0 +1,29 @@
+{
+ "name": "C_lora_uniform",
+ "model": "/home/hail/Videos/lf/models/qwen3vl8b-cctv",
+ "frames": "uniform",
+ "n": 798,
+ "parse_rate": 1.0,
+ "acc_parsed": 0.7380952380952381,
+ "acc_all": 0.7380952380952381,
+ "precision": 0.5398550724637681,
+ "recall": 0.645021645021645,
+ "f1": 0.5877712031558185,
+ "type_acc_on_anomaly": 0.27705627705627706,
+ "recall_per_type": {
+  "Abuse": 0.5,
+  "Arrest": 0.8181818181818182,
+  "Arson": 0.7777777777777778,
+  "Assault": 0.7777777777777778,
+  "Burglary": 0.7647058823529411,
+  "Explosion": 0.9166666666666666,
+  "Fighting": 0.6,
+  "RoadAccidents": 0.6666666666666666,
+  "Robbery": 0.4,
+  "Shooting": 0.7037037037037037,
+  "Shoplifting": 0.3125,
+  "Stealing": 0.6666666666666666,
+  "Vandalism": 0.75
+ },
+ "runtime_s": 171.4941532611847
+}
