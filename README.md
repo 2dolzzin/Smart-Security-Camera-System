@@ -1,376 +1,450 @@
-# CCTV 모니터링 시스템
+# VLM 구조화 로그 기반 지능형 CCTV 시스템
 
-로컬 CCTV/웹캠 영상에서 **움직임 구간만 자동으로 녹화**하고, 그 구간을 **자체 호스팅 VLM**으로 한국어로 설명·로그화하는 시스템입니다.
+CCTV 영상의 움직임 구간을 녹화하고, LoRA로 학습한 시각 언어 모델이 구간마다 **장소·객체·행동·이상 여부·이상 유형·요약**을 담은 한국어 JSON 로그를 만들어 저장하고 검색하는 시스템이다.
 
-- 항상 켜져 있고, 사람이 영상을 통째로 다시 볼 필요 없이 **이벤트(움직임)별 짧은 클립 + 한 줄 설명**만 쌓입니다.
-- VLM은 외부 API가 아니라 **자체 GPU 서버(`hail-pro6000`)에 띄운 Qwen3-VL-8B LoRA 모델**(vLLM) — 비용·프라이버시 부담 없음.
-- 졸업작품에서 VLM 출력을 한 줄 설명 → **구조화 JSON 로그(장소·객체·행동·이상여부·이상유형·요약)**로 바꾸고, 로그 임베딩(bge-m3)으로 자연어 검색을 붙임.
+| 자료 | 위치 |
+|---|---|
+| 개발 문서 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) |
+| 결과보고서 | [docs/REPORT.md](docs/REPORT.md) |
+| AI 활용보고서 | [docs/AI_USAGE.md](docs/AI_USAGE.md) |
+| 시연 영상 | (추가 예정) |
+| 포스터 | (추가 예정) |
 
----
-
-## 시스템 구성
-
-두 개의 서버 + 한 개의 웹 UI 로 나뉩니다.
-
-```
-┌─────────────────────── 클라이언트 측 (사용자 PC) ───────────────────────┐
-│                                                                       │
-│   [웹캠 / 입력 영상]                       [브라우저]                   │
-│        │                                       │                      │
-│        ▼                                       ▼                      │
-│   ┌──────────────────────┐               ┌──────────────────┐         │
-│   │ client/backend       │◄── WebSocket ─┤ client/frontend  │         │
-│   │  (FastAPI)           │   REST        │  (React)         │         │
-│   │  · 모션 감지·녹화      │◄────────────►│  /live /playback │         │
-│   │  · 전처리(360p·4fps)  │               │  /logs /settings │         │
-│   │  · SQLite 로그        │               └──────────────────┘         │
-│   └─────────┬────────────┘                                            │
-└─────────────┼─────────────────────────────────────────────────────────┘
-              │ POST /describe (다운샘플 mp4 업로드)
-              ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│   server/ (GPU 서버 hail-pro6000 · RTX PRO 6000 ×3)                 │
-│   app.py (FastAPI 어댑터 :8010) ──▶ vLLM Qwen3-VL-8B-cctv (:8002)   │
-│   영상 → 20초 창마다 8프레임 → 구조화 JSON 로그 + bge-m3 임베딩      │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-### 데이터 흐름 (한 이벤트의 일생)
-
-1. **카메라 캡처** — 웹캠 또는 `CAMERA_SOURCE` 영상 파일을 프레임 단위로 읽음
-2. **움직임 감지** — 프레임 차분(grayscale → blur → absdiff → threshold → dilate → contour) 후 변화 픽셀 비율이 임계치 이상이면 "움직임" 신호
-3. **세션 녹화** (`MotionSession`) — 움직임 감지되면 녹화 시작 → 움직임이 이어지면 타이머 리셋 → **마지막 움직임 후 N초간 정적**이면 세션 종료 (N은 `/settings`에서 변경)
-4. **영상 마무리** — `recorder`가 백그라운드 스레드에서 mp4 최종화 (avc1 코덱 가능하면 직접 저장, 아니면 mp4v로 받아 FFmpeg `-c copy`로 브라우저 호환 mp4로 remux)
-5. **전처리** — `preprocess.downsample_video`가 그 mp4를 **해상도 1/2(→360p) + 4fps**로 다운샘플 (같은 폴더에 `..._vlm.mp4` 로 보관)
-6. **VLM 호출** — `ai_describer`가 그 작은 mp4를 `POST {VLM_SERVER_URL}/describe`로 업로드 → 서버가 20초 창마다 변화량 기준 8프레임을 뽑아 LoRA 모델에 넣고 **구조화 JSON 로그 + 임베딩**(`logs[]`)을 반환. `description`(첫 로그 summary)은 하위호환용
-7. **로그 기록** — `motion_logs.description` 업데이트 → 프론트 `/logs`·`/playback` 타임라인에 표시
-8. **자동 정리** — 30일 지난 녹화·로그·`_vlm.mp4`는 매일 자정 자동 삭제
+**목차**: [1. Introduction](#1-introduction) · [2. Background](#2-background) · [3. Methodology](#3-methodology) · [4. Results](#4-results) · [5. Discussion](#5-discussion) · [6. Reference](#6-reference) · [부록: 실행 방법](#부록-실행-방법)
 
 ---
 
-## 기술 스택
+## 1. Introduction
 
-| 영역 | 기술 |
-|------|------|
-| Frontend | React 18, React Router v6, Zustand, Axios, dayjs, Vite |
-| Backend (Client) | Python 3.11+, FastAPI, OpenCV, SQLite (WAL), APScheduler, httpx |
-| VLM Server | Python 3.12, FastAPI(어댑터), **vLLM 0.33 + Qwen3-VL-8B-Instruct LoRA(자체 학습, UCF-Crime/UCA)**, OpenCV(프레임 추출), Transformers(**BAAI/bge-m3** 임베딩) |
-| 영상 저장·변환 | FFmpeg (mp4 remux), 로컬 파일시스템 |
-| 인프라 | 연구실 GPU 서버 `hail-pro6000` (RTX PRO 6000 Blackwell 96GB ×3). 클라이언트는 SSH 터널 또는 LAN으로 접속 |
+### 1.1 개요
 
----
+CCTV는 대부분의 시간 동안 아무 일도 일어나지 않는 영상을 쌓는다. 사람이 이를 다시 보는 것은 사건이 있었다는 사실을 다른 경로로 알게 된 뒤다. 이 프로젝트는 영상을 사람이 읽고 걸러 낼 수 있는 기록으로 바꾸는 것을 목표로 한다.
 
-## 디렉토리 구조
+시스템은 세 단계로 동작한다.
 
-```
-cctv-final/
-├── client/                         ← 사용자 PC 측 (백엔드 + 프론트)
-│   ├── backend/
-│   │   ├── main.py                 # FastAPI 진입점 (lifespan: DB·카메라·스케줄러 기동)
-│   │   ├── camera.py               # 캡처 루프 + WebSocket 브로드캐스트 + MotionSession
-│   │   ├── motion_detector.py      # OpenCV 움직임 감지 (debug.py 와 함수 공유)
-│   │   ├── recorder.py             # 이벤트 기반 녹화 + 코덱 자동선택 + FFmpeg remux
-│   │   ├── preprocess.py           # 녹화 mp4 → 360p·4fps 다운샘플 (VLM 입력용)
-│   │   ├── ai_describer.py         # 전처리 → VLM 서버 호출 → 로그 description 기록
-│   │   ├── scheduler.py            # 30일 자동 정리 스케줄러
-│   │   ├── database.py             # SQLite 초기화·헬퍼 (recordings/motion_logs/settings)
-│   │   ├── debug.py                # 모션 감지 4분할 시각화 (파라미터 튜닝용)
-│   │   ├── routers/
-│   │   │   ├── stream.py           # WebSocket /ws/stream
-│   │   │   ├── recordings.py       # 녹화 목록/상세/스트리밍(Range)/삭제 API
-│   │   │   ├── logs.py             # 로그 목록/상세 API
-│   │   │   └── settings.py         # 런타임 설정 GET/PUT API
-│   │   ├── recordings/             # 저장 영상 (.gitignore — 사생활)
-│   │   └── requirements.txt
-│   │
-│   └── frontend/
-│       ├── src/
-│       │   ├── App.jsx
-│       │   ├── main.jsx
-│       │   ├── index.css
-│       │   ├── api/index.js
-│       │   ├── store/index.js      # Zustand (playbackTarget, motionDetected)
-│       │   ├── pages/
-│       │   │   ├── LivePage.jsx
-│       │   │   ├── PlaybackPage.jsx
-│       │   │   ├── LogPage.jsx
-│       │   │   └── SettingsPage.jsx
-│       │   └── components/
-│       │       ├── Sidebar.jsx
-│       │       ├── VideoPlayer.jsx
-│       │       └── MotionLogList.jsx
-│       ├── vite.config.js          # /api·/ws → http://localhost:8800 프록시
-│       └── package.json
-│
-└── server/                         ← GPU 서버용 VLM 어댑터 (vLLM 앞단)
-    ├── app.py                      # POST /describe (영상 → 창별 JSON 로그 + 임베딩), POST /embed, GET /health
-    └── requirements.txt
-```
+1. 클라이언트가 움직임이 있는 구간만 녹화한다.
+2. GPU 서버의 시각 언어 모델(VLM)이 녹화를 20초 단위로 나눠 각 구간을 정해진 형식의 JSON 로그로 기술한다.
+3. 로그를 데이터베이스에 저장해 이상 여부로 거르고, 자연어로 검색하고, 해당 시점의 영상으로 이동한다.
+
+모델은 Qwen3-VL-8B에 LoRA를 적용해 학습했다. 학습 데이터는 UCF-Crime 영상과 UCA 주석에서 만든 클립 5,405개다.
+
+### 1.2 기존 방법의 한계
+
+- **움직임 감지 녹화**는 무엇이 움직였는지 알려 주지 않는다. 바람에 흔들리는 나무와 침입자가 같은 이벤트로 기록된다.
+- **영상 이상 탐지 모델**은 프레임마다 이상 점수 하나를 출력한다. 점수가 높은 이유와 장면의 내용은 알 수 없고, 점수로는 과거 기록을 검색할 수 없다.
+- **범용 VLM의 영상 설명**은 자유 형식 문장이다. 프로그램이 읽을 수 없어서 필터나 통계에 쓰기 어렵다. 형식을 지시해도 지키지 않는 경우가 있고, 이상 유형을 정해진 목록 밖의 단어로 답한다.
+- 이 프로젝트의 이전 버전(캡스톤디자인)은 녹화 하나에 한 줄 설명 하나를 붙였다. 긴 녹화에서 사건이 어느 시점에 있는지 알 수 없었다.
+
+### 1.3 기여
+
+1. **구조화 로그 스키마와 학습 데이터**: 여섯 개 필드로 이루어진 한국어 로그 스키마를 정의하고, 공개 데이터셋에서 클립 5,405개의 학습 데이터를 만드는 절차를 구성했다. 묘사 필드는 큰 모델이 쓰고 판정 필드는 데이터셋 라벨에서 넣었다.
+2. **LoRA 학습과 비교 평가**: 같은 베이스 모델에서 프롬프트만 쓴 경우와 LoRA를 적용한 경우를 비교했다. 스키마 파싱 성공률은 0.932에서 0.999로, 이상 재현율은 0.516에서 0.674로 올랐다.
+3. **오탐 분석**: 오탐을 클립의 출처별로 나눠, 대부분이 사건 영상 속의 평범한 구간에서 나온다는 것을 확인했다.
+4. **시스템 통합**: 학습한 모델을 기존 CCTV 시스템에 연결해 창 단위 로그, 이상 필터, 타임라인 표시, 임베딩 기반 자연어 검색을 구현했다.
+
+연구의 신규성을 주장하지 않는다. 이 프로젝트는 알려진 방법을 조합해 실제로 동작하는 시스템을 만들고 그 효과와 한계를 측정한 것이다.
 
 ---
 
-## 실행 방법
+## 2. Background
 
-총 3개 컴포넌트를 띄웁니다. 처음 한 번만 설치, 그 뒤로는 실행만.
+### 2.1 영상 이상 탐지
 
-### 1. VLM 서버 (GPU 서버 `hail-pro6000`)
+영상 이상 탐지(Video Anomaly Detection)는 영상에서 정상 패턴을 벗어난 구간을 찾는 문제다. 감시 영상 분야의 표준 벤치마크는 UCF-Crime[1]이다. 이 데이터셋은 영상 단위의 라벨만 제공한다. 프레임마다 이상 여부를 표시하는 비용이 크기 때문이다.
 
-서버에는 리포의 `server/`만 있으면 된다 (`~/Smart-Security-Camera-System`). conda env `cctv`(vLLM 0.33) 사용.
-모델 학습·데이터 파이프라인은 `~/Videos/CLAUDE.md` 참고.
+이 조건에서 정착한 접근이 약지도 학습이다. Sultani 등[1]은 영상을 여러 구간으로 나누고 다중 인스턴스 학습(MIL)으로 구간별 이상 점수를 학습했다. 이후 연구는 특징 크기를 이용해 구간 선택을 개선하거나[3] CLIP 같은 시각 언어 사전학습 모델의 특징을 활용했다[4]. 평가는 프레임 단위 ROC 곡선의 AUC로 한다.
 
-```bash
-# 0) 빈 GPU 확인 (유령 서버가 남아 있을 수 있음)
-nvidia-smi
+**이 접근의 한계.** 출력이 점수다. 운영자는 점수가 높은 구간을 직접 열어 봐야 무슨 일인지 안다. 유형을 분류하는 연구도 있지만 장면의 내용을 기록으로 남기지는 않는다.
 
-# 1) tmux 안에서 vLLM 모델 서버 (LoRA 병합 모델, 서버 내부 전용 :8002)
-conda activate cctv
-CUDA_VISIBLE_DEVICES=1 vllm serve ~/Videos/lf/models/qwen3vl8b-cctv --port 8002 \
-    --max-model-len 8192 --limit-mm-per-prompt '{"image":8}' --gpu-memory-utilization 0.8
+### 2.2 시각 언어 모델과 감시 영상
 
-# 2) 다른 tmux 창에서 어댑터 (:8010). bge-m3는 vLLM과 같은 GPU에 올려도 됨(~1.2 GB)
-cd ~/Smart-Security-Camera-System/server
-CUDA_VISIBLE_DEVICES=1 uvicorn app:app --host 0.0.0.0 --port 8010
-#   SSH 터널로만 접속할 거면 --host 127.0.0.1
+시각 언어 모델(VLM)은 이미지와 텍스트를 함께 입력받아 텍스트를 생성한다. 프레임 여러 장을 주면 영상의 내용을 문장으로 설명한다. 감시 영상에 언어를 결합하려는 흐름에서 UCA[2]는 UCF-Crime 영상에 구간별 영어 문장을 붙였고, 학습 없이 VLM의 캡션을 언어 모델로 평가해 이상 점수를 얻는 방법[5]도 제안되었다.
 
-# 3) 확인
-curl http://localhost:8010/health
-curl -F file=@~/Videos/UCF_Crime/Robbery/Robbery050_x264.mp4 http://localhost:8010/describe
-```
+**이 접근의 한계.**
 
-`/health`가 `{"status":"ok","vllm":true,...,"embed_ready":true}` 면 정상. `"status":"degraded"`면 vLLM(:8002)이 안 떠 있는 것.
+- 출력 형식이 일정하지 않다. JSON을 요청해도 일부 응답은 파싱되지 않고, 열거형 필드에 목록 밖의 값이 들어온다.
+- 범용 모델은 감시 영상의 이상 유형 분류에 맞춰져 있지 않다.
+- 한국어로 일관된 문체의 로그를 얻기 어렵다.
+- 대형 모델은 추론 비용이 커서 상시 운영에 부담이 된다.
 
-**네트워크 (클라이언트 → 서버 8010)** — AWS 보안그룹 대신:
-- 같은 LAN이면 서버 내부 IP로 직접: `VLM_SERVER_URL=http://<서버IP>:8010` (서버에서 `ip addr`로 확인).
-- 다른 망(학교 NAT 등)이거나 확실치 않으면 **SSH 터널**(권장, 방화벽 설정 불필요). 클라이언트 PC에서
-  `ssh -N -L 8010:localhost:8010 hail@<서버>` 를 열어 두고 `VLM_SERVER_URL=http://localhost:8010`.
+### 2.3 산업 현황
 
-### 2. 백엔드 (클라이언트 PC)
+상용 CCTV와 NVR은 움직임 감지 녹화와 객체 검출 기반 알림(사람, 차량)을 제공한다. 외부 클라우드의 영상 분석 API를 쓰면 더 풍부한 설명을 얻을 수 있지만 영상이 외부로 나가고 사용량에 따라 비용이 든다. 이 프로젝트는 모델을 자체 GPU 서버에서 서빙해 영상이 내부망을 벗어나지 않게 했다.
 
-```bash
-cd client/backend
+### 2.4 사용한 모델과 도구
 
-python3 -m venv venv
-source venv/bin/activate                          # Windows: venv\Scripts\activate
-pip install -r requirements.txt
+| 이름 | 역할 |
+|---|---|
+| Qwen3-VL-8B-Instruct [7] | 학습 대상 베이스 모델 |
+| Qwen3-VL-32B-Instruct [7] | 학습 데이터의 묘사 필드를 쓰는 teacher 모델 |
+| Qwen3-8B | UCA 구간 문장을 이상/정상으로 분류하는 텍스트 모델 |
+| LoRA [6] | 저랭크 어댑터 미세조정 |
+| LLaMA-Factory [8] | 학습 프레임워크 |
+| vLLM [9] | 모델 서빙 |
+| BAAI/bge-m3 [10] | 로그 텍스트 임베딩 (1024차원) |
 
-# VLM 서버 주소 지정 (uvicorn 과 같은 터미널에서 export). SSH 터널이면 localhost
-export VLM_SERVER_URL="http://localhost:8010"
+**LoRA.** 사전학습 가중치 $W_0$를 고정하고 저랭크 행렬 두 개의 곱을 더해 학습한다.
 
-uvicorn main:app --port 8800
-```
+$$W = W_0 + \frac{\alpha}{r} BA, \qquad B \in \mathbb{R}^{d \times r},\ A \in \mathbb{R}^{r \times k}$$
 
-- `VLM_SERVER_URL` 을 안 주면 VLM 호출은 건너뛰고 로그 설명에 `"움직임 감지됨"` 폴백 문구가 들어갑니다.
-- 데모/테스트 중엔 `--reload` 빼고 실행하는 게 안전 (녹화 파일 쓰는 도중 리로드되면 짧은 잔재 녹화가 생길 수 있음).
+이 프로젝트에서는 $r = 32$, $\alpha = 64$를 썼다.
 
-### 3. 프론트엔드 (클라이언트 PC, 새 터미널)
+**지식 증류.** 큰 모델(teacher)의 출력을 작은 모델(student)의 학습 목표로 쓰는 방법이다[11]. 여기서는 32B 모델이 쓴 묘사를 8B 모델이 학습한다.
 
-```bash
-cd client/frontend
-npm install
-npm run dev
-```
+### 2.5 용어, 단위, 수식
 
-→ 브라우저 **http://localhost:5173** 접속.
+| 용어 | 정의 |
+|---|---|
+| 구간 (segment) | UCA 주석이 붙은 영상의 시간 범위. 단위는 초 |
+| 클립 (clip) | 학습·평가의 한 표본. 구간에서 뽑은 프레임 8장 |
+| 창 (window) | 추론 시 녹화를 나누는 고정 길이 구간. 기본 20초 |
+| 세션 (session) | 움직임 시작부터 침묵 시간 경과까지의 녹화 단위 |
+| 이상 유형 | UCF-Crime의 13개 유형과 `None` |
 
-### 동작 확인 한 줄
+**프레임 차분 점수.** 160×120 그레이스케일로 줄인 프레임 $g_t$에 대해
 
-```bash
-curl http://localhost:8010/health          # VLM 서버 (터널/LAN 주소)
-curl http://localhost:8800/                # 클라이언트 백엔드
-```
-둘 다 `{"status":"ok", ...}` 나오면 풀스택 OK.
+$$s_t = \frac{1}{HW} \sum_{x,y} \left| g_t(x,y) - g_{t-1}(x,y) \right|$$
 
----
+**프레임 선택.** 프레임 열을 8개 구간 $B_1, \dots, B_8$로 등분하고 구간마다 $\arg\max_{t \in B_i} s_t$를 고른다.
 
-## 페이지 구성
+**판정 지표.** 이상을 양성으로 둔다. TP는 이상 클립을 이상으로, FP는 정상 클립을 이상으로, FN은 이상 클립을 정상으로 판정한 수다.
 
-| 경로 | 설명 |
-|------|------|
-| `/live` | 실시간 카메라 스트리밍 (움직임 감지 시 빨간 테두리), WebSocket 자동 재연결 |
-| `/playback` | 날짜별 녹화 목록 → 영상 재생 + 타임라인 + 움직임 마커 + 구간 요약 + **녹화 삭제(🗑)** |
-| `/logs` | 움직임 로그 (오늘/일주일/한 달 필터), 클릭 시 해당 녹화로 점프 |
-| `/settings` | 녹화 종료 대기 시간(무동작 N초) 조절 — 즉시 반영 |
+$$\text{정밀도} = \frac{TP}{TP + FP}, \qquad \text{재현율} = \frac{TP}{TP + FN}, \qquad F_1 = \frac{2 \cdot \text{정밀도} \cdot \text{재현율}}{\text{정밀도} + \text{재현율}}$$
 
----
+- **파싱 성공률**: 출력에서 JSON을 추출할 수 있고 필수 키가 있는 비율
+- **유형 정확도**: 이상 클립 중 `anomaly_type`이 정답과 같은 비율
+- **오탐률**: 정상 클립 중 이상으로 판정한 비율
 
-## 주요 기능
+**검색 유사도.** 질의 임베딩 $q$와 로그 임베딩 $e$의 코사인 유사도를 쓴다.
 
-- **이벤트 기반 자동 녹화** — 움직임 시작 → 녹화, 마지막 움직임 후 N초 정적이면 종료. 녹화 1개 = 움직임 로그 1개.
-- **이벤트 단위 파일 저장** — `recordings/YYYY-MM-DD/HH-MM-SS.mp4`. 통영상 저장 대비 디스크 사용량 극단적으로 작음.
-- **VLM 구조화 로그** — 녹화 → 전처리(360p·4fps) → GPU 서버 Qwen3-VL-8B LoRA → 20초 창마다 JSON 로그(장소·객체·행동·이상여부·유형·요약) + 임베딩 → motion_log에 기록 → 프론트에 표시.
-- **로그 클릭 → 영상 점프** — 로그 항목 클릭 시 해당 녹화 자동 재생.
-- **녹화 삭제** — `/playback`에서 영상·DB·연결된 로그·부산물(`_raw.mp4`, `_vlm.mp4`)까지 일괄 삭제.
-- **설정 가능한 침묵 타임아웃** — `/settings`에서 3–600초, DB에 저장되어 즉시 반영(서버 재시작 불필요).
-- **30일 자동 정리** — 매일 자정 오래된 녹화·로그·부산물 일괄 삭제.
-- **테스트용 영상 입력 모드** — `CAMERA_SOURCE` 환경변수로 웹캠 대신 사전 녹화된 영상을 입력 (실제 카메라처럼 원본 fps로 재생, 끝나면 처음부터 반복).
-- **개발자용 전처리 결과 보관** — VLM에 실제 보낸 다운샘플 mp4(`..._vlm.mp4`)를 녹화 옆에 저장 → 디스크에서 직접 검증 가능.
-- **HTTP Range 지원 영상 스트리밍** — `<video>` seek 정상 동작.
-- **WebSocket keep-alive 핑** — 프레임 5초 공백 시에도 연결 유지.
+$$\text{sim}(q, e) = \frac{q \cdot e}{\lVert q \rVert \, \lVert e \rVert}$$
+
+**언어.** 로그 본문은 한국어다. 열거형 값(`anomaly_type`)은 UCF-Crime의 폴더 이름과 같은 영어로 저장하고 화면에서만 한국어로 표시한다.
+
+### 2.6 프로젝트의 경과
+
+2026년 1학기 캡스톤디자인에서 움직임 감지 녹화, 웹 UI, VLM 한 줄 설명을 갖춘 CCTV 모니터링 시스템을 만들었다. 당시에는 Qwen2.5-VL-3B를 클라우드 GPU 인스턴스에 올려 녹화마다 한 문장을 받았다.
+
+이 구성에는 세 가지 한계가 있었다. 문장으로는 로그를 걸러 낼 수 없었다. 녹화 하나에 문장 하나라서 긴 녹화의 어느 시점이 문제인지 알 수 없었다. 이상 여부를 판단하려면 사람이 문장을 전부 읽어야 했다.
+
+졸업작품에서는 모델의 출력을 바꾸는 쪽을 택했다. 별도의 이상 탐지 모듈을 붙이는 대신 VLM이 묘사와 판정을 한 출력에 함께 쓰도록 학습시켰다. 서빙은 연구실 GPU 서버로 옮겼다.
 
 ---
 
-## 환경변수
+## 3. Methodology
 
-### 백엔드 (`client/backend/`)
+### 3.1 문제 설정
 
-| 변수 | 설명 | 기본값 |
-|------|------|--------|
-| `VLM_SERVER_URL` | VLM 어댑터 서버 주소 (예: `http://localhost:8010` 터널, `http://172.29.55.2:8010` LAN). 비어 있으면 VLM 호출 생략, 로그 설명은 `"움직임 감지됨"` | (없음) |
-| `VLM_TIMEOUT` | VLM 서버 응답 대기 시간(초). 서버는 20초 창당 약 2초 걸리므로 긴 녹화면 창 수 × 2초 이상 | `300` |
-| `VLM_WINDOW_SEC` | 서버 창 길이 덮어쓰기(3~120초). 비우면 서버 기본 20초 | (없음) |
-| `VLM_QUESTION` | (구버전 호환) 서버가 받기만 하고 무시함 — LoRA 학습 프롬프트를 그대로 써야 하기 때문 | (없음) |
-| `CAMERA_SOURCE` | 테스트용 입력 영상 경로(또는 RTSP URL 등). 파일이면 끝까지 가면 반복 재생. 미지정 시 웹캠 | (없음) |
+입력은 시간순 프레임 8장이고 출력은 다음 스키마의 JSON 하나다.
 
-### VLM 서버 (`server/`)
-
-| 변수 | 설명 | 기본값 |
-|------|------|--------|
-| `VLM_MODEL` | HuggingFace 모델 ID | `Qwen/Qwen2.5-VL-3B-Instruct` |
-| `VLM_QUESTION` | 클라이언트가 question을 안 주면 사용할 기본 프롬프트 | (CCTV 한 줄 설명 프롬프트) |
-| `VLM_MAX_NEW_TOKENS` | 생성 최대 토큰 수 | `64` |
-
-### DB에 저장되는 런타임 설정
-
-| 키 | 설명 | 범위 |
-|----|------|------|
-| `silence_sec` | 녹화 종료까지 무동작 대기(초). `/settings` 또는 `PUT /api/settings` 로 변경 | 3–600 |
-
----
-
-## 카메라 / 입력 설정
-
-`client/backend/camera.py` 상단:
-
-```python
-CAMERA_INDEX = 0   # 기본 웹캠 (1, 2 ... 로 다른 장치 선택 가능)
-```
-
-웹캠이 없거나 열기 실패하면 **데모 모드**로 자동 전환(검은 화면에 시간 오버레이).
-
-테스트 시 **사전 녹화 영상**을 카메라처럼 사용하려면:
-
-```bash
-export CAMERA_SOURCE="/path/to/test.mp4"
-uvicorn main:app --port 8800
-```
-
-→ 원본 영상의 fps 그대로 실시간 재생되며, 모션 감지/녹화/VLM 파이프라인을 그대로 통과합니다. 끝나면 처음부터 반복 재생.
-
----
-
-## API 명세
-
-### 클라이언트 백엔드 (`http://localhost:8800`)
-
-**WebSocket**
-- `/ws/stream` — 실시간 프레임 + 모션 플래그. 메시지: `{frame: <base64 jpeg>, motion: bool, timestamp: ISO}` 또는 keep-alive `{ping: true}`.
-
-**REST**
-
-| Method | Endpoint | 설명 |
-|--------|----------|------|
-| GET | `/api/recordings` | 녹화 목록 (`?date=YYYY-MM-DD`, 실제 파일 존재 시에만) |
-| GET | `/api/recordings/{id}` | 녹화 상세 + 연결된 움직임 로그 |
-| GET | `/api/recordings/{id}/video` | 영상 파일 스트리밍 (HTTP Range 완전 지원 → seek 가능) |
-| DELETE | `/api/recordings/{id}` | 영상·DB·연결 로그·부산물(`_raw.mp4`/`_vlm.mp4`) 일괄 삭제 |
-| GET | `/api/logs?period=day\|week\|month&anomaly=1&type=Robbery` | 창 단위 로그 목록. `anomaly=1` 이상만, `type` 유형 필터. 각 로그에 `window_start/window_end`, `is_anomaly`, `anomaly_type`, `scene`, `action`, `objects`, `summary` |
-| GET | `/api/logs/search?q=<자연어>&period=month&anomaly=1&top_k=20` | 자연어 검색. 질의를 VLM 서버 `/embed`로 임베딩 → SQLite 로그 임베딩과 코사인 유사도 상위 N (`score` 포함) |
-| GET | `/api/logs/{id}` | 로그 상세 (연결 녹화 정보 포함) |
-| GET | `/api/settings` | 런타임 설정 + 허용 범위 |
-| PUT | `/api/settings` | 설정 변경 (`{"silence_sec": 45}`) — 즉시 반영 |
-
-### VLM 서버 (`http://<서버>:8010`, `server/app.py`)
-
-| Method | Endpoint | 설명 |
-|--------|----------|------|
-| GET | `/health` | `{"status":"ok|degraded","vllm":bool,"model":...,"embed_model":"BAAI/bge-m3","embed_ready":bool,"window_sec":20}` |
-| POST | `/describe` | multipart: `file=<영상>`, `window_sec=<3~120, 선택>` → 아래 응답 |
-| POST | `/embed` | json `{"text":"..."}` → `{"embedding":[1024 floats]}` (검색 질의용) |
-
-`/describe` 응답:
 ```json
-{"description": "<첫 로그의 summary>",
- "logs": [{"window_start": 0.0, "window_end": 20.0,
-           "log": {"scene": "주차장", "objects": [{"type": "사람", "count": 2, "appearance": "..."}],
-                   "action": "...", "is_anomaly": "정상|이상",
-                   "anomaly_type": "Abuse|Arrest|Arson|Assault|Burglary|Explosion|Fighting|RoadAccidents|Robbery|Shooting|Shoplifting|Stealing|Vandalism|None",
-                   "summary": "..."},
-           "raw": "<모델 원문>", "embedding": [1024 floats]}],
- "duration_sec": 56.7, "n_windows": 3, "window_sec": 20.0, "elapsed_sec": 5.9}
+{"scene": "장소 유형",
+ "objects": [{"type": "사람|차량|동물|물건", "count": 1, "appearance": "외형"}],
+ "action": "관찰 가능한 동작 1문장",
+ "is_anomaly": "정상|이상",
+ "anomaly_type": "Abuse|Arrest|Arson|Assault|Burglary|Explosion|Fighting|RoadAccidents|Robbery|Shooting|Shoplifting|Stealing|Vandalism|None",
+ "summary": "1문장 요약"}
 ```
-영상은 20초 창으로 쪼개 창마다 로그 하나(3초 미만 꼬리는 앞 창에 합침). 파싱 실패한 창은 `log`/`embedding`이 `null`.
-처리 시간은 창당 약 2초(RTX PRO 6000 기준).
+
+설계 원칙은 네 가지다.
+
+- **판정을 출력에 흡수한다.** 이상 여부와 유형을 로그의 필드로 두어 추론 한 번으로 묘사와 판정을 함께 얻는다.
+- **입력 크기를 고정한다.** 구간 길이와 무관하게 프레임 8장을 쓴다.
+- **보이는 것만 쓴다.** 의도와 감정의 추측, 외모 평가, 인종 표현을 금지한다.
+- **언어 모델만 학습한다.** 비전 인코더와 프로젝터는 고정한다. 학습할 것은 보는 능력이 아니라 본 것을 스키마로 쓰는 방법이라고 보았다.
+
+### 3.2 데이터
+
+**선택한 데이터.** UCF-Crime[1]은 감시 영상 1,900편(이상 13개 유형 950편, 정상 950편)이다. UCA[2]는 그중 1,854편에 23,542개 구간의 영어 문장을 붙였다. 감시 카메라 시점의 영상에 유형 라벨과 구간별 설명이 모두 있어서 이 조합을 골랐다.
+
+**구축 절차.**
+
+```
+UCF-Crime 영상 + UCA 주석
+  ① 구간 표 생성           구간 23,542개
+  ② 구간 라벨링            이상 영상의 구간 8,347개를 Qwen3-8B로 이상/정상 분류
+  ③ 클립 선별과 프레임 추출   5,405 클립 × 8프레임
+  ④ teacher 로그 생성       Qwen3-VL-32B가 scene, objects, action, summary 작성
+  ⑤ 판정 필드 삽입          is_anomaly, anomaly_type은 라벨에서 코드로 삽입
+  ⑥ 학습 형식 변환          train 4,154 / val 453 / test 798
+```
+
+- **②가 필요한 이유.** UCA의 구간은 무언가 일어난 구간이다. 이상 영상 안에도 평범한 장면이 많다. 영상 라벨을 모든 구간에 그대로 붙이면 평범한 장면이 이상으로 학습된다.
+- **라벨 정책.** 사건 자체와 직후의 결과 장면은 이상이다. 사건 전의 평범한 장면과 사후의 장면은 정상이다.
+- **⑤의 이유.** teacher가 판정까지 쓰면 그 오판이 정답으로 학습된다. 판정은 데이터셋 라벨에서만 온다.
+- **선별.** 이상 구간 전부, 정상 영상에서 편당 최대 4개, 이상 영상 속의 정상 구간을 포함했다. 3초 미만은 제외하고 60초를 넘으면 앞 60초만 썼다.
+- **분할.** UCF-Crime의 공식 학습/테스트 분할을 따랐다. 검증 세트는 학습 영상의 10%를 영상 단위로 분리했다.
+
+| | 이상 | 정상 | 합 |
+|---|---|---|---|
+| 학습 + 검증 | 1,696 | 2,911 | 4,607 |
+| 테스트 | 231 | 567 | 798 |
+
+### 3.3 학습
+
+| 항목 | 값 |
+|---|---|
+| 베이스 모델 | Qwen3-VL-8B-Instruct |
+| LoRA | rank 32, alpha 64, dropout 0.05 |
+| 고정 | 비전 인코더, 멀티모달 프로젝터 |
+| 최적화 | 학습률 1e-4, cosine, warmup 0.05, 유효 배치 16, 3 에폭, bf16 |
+| 하드웨어 | RTX PRO 6000 Blackwell 96 GB 1장, 약 84분 |
+
+### 3.4 실험과 지표
+
+테스트 클립 798개에서 네 조건을 비교했다.
+
+| 조건 | 모델 | 프레임 선택 | 확인하려는 것 |
+|---|---|---|---|
+| A | 베이스 모델, 같은 지시문 | 변화량 | LoRA 없이 프롬프트만으로 가능한 수준 |
+| B | LoRA 1차 | 변화량 | LoRA의 효과 |
+| C | LoRA 1차 | 균등 | 프레임 선택 방식의 영향 |
+| B2 | LoRA 2차 (이상 영상 속 정상 구간 증량) | 변화량 | hard negative의 영향 |
+
+지표는 2.5절에 정의한 파싱 성공률, 정밀도, 재현율, F1, 유형 정확도다. 오탐률은 정상 영상의 클립과 이상 영상 속 정상 클립으로 나눠 계산했다.
+
+비교 대상은 같은 베이스 모델의 A다. 프레임 단위 AUC를 쓰는 기존 이상 탐지 연구와는 과제와 지표가 달라 수치를 직접 비교하지 않는다.
+
+### 3.5 시스템 구조
+
+```
+┌──────────────── 클라이언트 PC ────────────────┐
+│  [카메라]                      [브라우저]      │
+│     │                             │           │
+│     ▼                             ▼           │
+│  client/backend  ◄─ WS / REST ─  client/frontend
+│  FastAPI :8800                 React :5173    │
+│  · 움직임 감지, 세션 녹화                       │
+│  · 전처리 (360p, 약 4fps)                      │
+│  · SQLite (로그 + 임베딩)                      │
+│  · 필터, 유사도 검색                            │
+└─────┬─────────────────────────────────────────┘
+      │ POST /describe (mp4), POST /embed
+      ▼
+┌──────────────── GPU 서버 ─────────────────────┐
+│  server/app.py  어댑터 :8010                  │
+│  · 20초 창 분할 → 창마다 8프레임 선택          │
+│  · 출력 파싱, 열거형 정규화                    │
+│  · bge-m3 임베딩                              │
+│     │                                         │
+│     ▼                                         │
+│  vLLM :8002  Qwen3-VL-8B + LoRA (병합)        │
+└───────────────────────────────────────────────┘
+```
+
+**이벤트 하나의 처리 순서**
+
+1. 프레임 차분으로 움직임을 감지하면 녹화를 시작한다.
+2. 마지막 움직임 이후 설정한 시간(기본 30초)이 지나면 녹화를 끝낸다.
+3. 녹화를 640×360, 약 4fps로 줄여 서버에 올린다.
+4. 서버가 20초 창마다 프레임 8장을 골라 모델에 넣고 JSON 로그와 임베딩을 만든다.
+5. 클라이언트가 창마다 로그 한 건을 DB에 저장한다.
+6. 웹 UI에서 로그를 보고 누르면 영상의 해당 시점으로 이동한다.
+
+추론 시의 프레임 선택 규칙과 지시문은 학습 때와 같다.
+
+**저장소 구성**
+
+```
+client/backend/    FastAPI 백엔드 (캡처, 감지, 녹화, DB, API)
+client/frontend/   React 웹 UI (/live, /playback, /logs, /settings)
+server/            VLM 어댑터 서버
+research/          데이터 구축, 학습 설정, 평가 스크립트
+scripts/           실행 스크립트
+docs/              개발 문서, 결과보고서, AI 활용보고서
+```
+
+모듈별 구현은 [개발 문서](docs/DEVELOPMENT.md)에 있다.
 
 ---
 
-## 전처리 (VLM 입력) 파라미터
+## 4. Results
 
-`client/backend/preprocess.py` 상단:
+### 4.1 핵심 결과
 
-```python
-REDUCE     = 2    # 1/REDUCE 로 가로/세로 축소 (1280x720 → 640x360 = 360p)
-TARGET_FPS = 4    # 결과 영상 초당 프레임 수
-```
+**판정 성능 (테스트 798 클립: 이상 231, 정상 567)**
 
-팀 사전 실험에서 **360p / 4fps가 인식 신뢰도 마지노선**(이 이하로 내리면 객체를 오인하기 시작)으로 검증되어 기본값으로 채택. 더 가볍게 가려면 `REDUCE=4, TARGET_FPS=2`(180p·2fps)도 가능하나 인식률 하락 감수.
+| | 파싱 | 정확도 | 정밀도 | 재현율 | F1 | 유형 정확도 |
+|---|---|---|---|---|---|---|
+| A 베이스 | 0.932 | 0.713 | 0.610 | 0.516 | 0.559 | 0.177 |
+| **B LoRA** | **0.999** | 0.736 | 0.534 | **0.674** | **0.596** | 0.274 |
+| C LoRA + 균등 | 1.000 | 0.738 | 0.540 | 0.645 | 0.588 | 0.277 |
+| B2 LoRA + hard neg | 0.999 | 0.751 | 0.571 | 0.576 | 0.573 | 0.260 |
 
-### 개발자용: 실제로 VLM에 보낸 영상 확인
+**오탐률의 출처별 분해**
 
-전처리 결과는 자동 삭제되지 않고 녹화 옆에 보관됩니다:
+| | 정상 영상의 클립 (n≈313) | 이상 영상 속 정상 클립 (n≈254) |
+|---|---|---|
+| A | 0.03 | 0.26 |
+| B | 0.06 | 0.46 |
+| C | 0.05 | 0.44 |
 
-```
-client/backend/recordings/2026-05-12/14-30-05.mp4         ← 원본 녹화 (720p)
-client/backend/recordings/2026-05-12/14-30-05_vlm.mp4     ← VLM에 보낸 다운샘플본 (360p, 4fps)
-```
+**관측한 것**
 
-VLC/QuickTime 등으로 직접 열어보면 됩니다. (해당 녹화를 삭제하거나 30일 정리 시 함께 삭제됨)
+1. LoRA를 적용하면 출력이 스키마를 지킨다. 파싱 실패가 약 7%에서 0.1%로 줄었고, 유형 필드에 목록 밖의 값이 나오지 않았다.
+2. 재현율이 0.516에서 0.674로 올랐다. 정밀도는 0.610에서 0.534로 내렸다.
+3. 오탐은 사건 영상 속의 평범한 구간에 집중된다. 정상 영상에서의 오탐률은 0.06이다.
+4. hard negative를 늘리면(B2) 정밀도가 오르고 재현율이 내린다. F1은 오르지 않았다.
+5. 프레임 선택 방식(B와 C)은 결과에 거의 영향을 주지 않았다.
+6. 유형 혼동은 의미가 가까운 쌍에 몰린다. Shoplifting과 Robbery, Explosion과 Arson, Burglary와 Robbery, Shooting과 Assault다.
+
+**시스템 통합 결과 (GPU 서버에서 UCF-Crime 영상으로 검증)**
+
+| 항목 | 결과 |
+|---|---|
+| 처리 시간 | 창 하나에 약 2초. 57초 영상(3창)에 5.9초 |
+| 창 길이 | 60초 창은 Robbery050, Fighting003, Shoplifting001의 사건을 모두 놓쳤고, 20초 창은 모두 해당 구간에서 검출 |
+| 정상 영상 | 2편의 20초 창 17개에서 오탐 0 |
+| 자연어 검색 | 3개 질의 모두 의미가 맞는 창이 1위 |
+
+실제 카메라를 연결한 구동 결과는 아직 없다. 상세한 구동 결과는 [결과보고서 5장](docs/REPORT.md#5-구동-결과)에 있다.
+
+### 4.2 결과가 우연이 아니라는 근거
+
+- **표본 수.** 재현율은 이상 클립 231개, 파싱 성공률은 798개에서 계산했다. A와 B의 재현율 차이는 0.158이다. 두 비율의 표준오차를 독립 표본으로 근사하면 약 0.045여서 차이는 표준오차의 3.5배 정도다. 두 조건은 같은 클립에서 측정한 것이므로 정확한 검정은 클립별 결과를 짝지은 McNemar 검정이며, 이는 수행하지 않았다.
+- **입력을 바꿔도 유지된다.** C는 B와 같은 모델에 다른 방식으로 고른 프레임을 넣은 것이다. 모든 지표가 B와 0.03 이내다. LoRA의 효과가 특정 프레임 조합에 의존하지 않는다.
+- **분해 결과가 일관된다.** 오탐이 이상 영상 속 정상 클립에 몰리는 양상은 A, B, C 모두에서 같다.
+- **한계.** 학습은 조건마다 한 번씩만 했다. 난수 시드에 따른 분산은 측정하지 않았다. B와 B2의 F1 차이(0.023)처럼 작은 차이는 이 분산 안에 있을 수 있다.
+
+### 4.3 해석
+
+**LoRA가 배운 것은 형식과 판정 기준이다.** 파싱과 열거형 준수는 거의 완전히 해결되었다. 5천 개 규모의 데이터로 출력 형식을 가르치기에는 충분했다.
+
+**판별력보다 판정 기준이 움직였다.** B는 A보다 이상을 더 많이 찍는다. 재현율이 오르고 정밀도가 내린 것은 그 결과다. B2는 반대 방향으로 움직였다. hard negative를 늘려도 F1이 오르지 않은 것은 모델이 두 부류를 더 잘 가르게 된 것이 아니라 경계의 위치만 옮겼다는 뜻이다.
+
+**모델은 장면의 맥락에 기댄다.** 강도가 일어나기 직전의 편의점처럼, 학습 데이터에서 사건이 일어난 장소의 장면은 사건이 없어도 이상으로 판정되는 일이 많다. 프레임 8장으로는 짧은 동작을 구분하기 어렵고, 데이터에서 장면과 라벨의 상관이 강하기 때문으로 본다.
+
+**A의 낮은 오탐률은 장점이 아니다.** A는 이상 클립의 절반가량을 정상으로 판정한다. 오탐이 적은 것은 이상 판정 자체가 적어서다.
+
+**입력 조건이 학습 분포를 벗어나면 성능이 떨어진다.** 학습 클립의 평균 길이는 17초다. 60초 창은 그 분포의 끝이고 사건을 놓쳤다. 해상도와 fps를 낮췄을 때도 판정이 달라졌다.
 
 ---
 
-## 모션 감지 파라미터 튜닝
+## 5. Discussion
 
-`client/backend/motion_detector.py` 상단:
+### 5.1 기존 한계를 어떻게 보완했는가
 
-```python
-BLUR_SIZE        = (21, 21)
-THRESHOLD_VALUE  = 25       # 이진화 임계값 (높을수록 둔감)
-MIN_CONTOUR_AREA = 1500     # 최소 움직임 면적 (높을수록 둔감)
-DILATE_ITER      = 2
-```
+| 2장에서 든 한계 | 이 프로젝트의 대응 | 남은 문제 |
+|---|---|---|
+| 이상 탐지 모델의 출력이 점수뿐이다 | 장소, 객체, 행동, 요약을 판정과 함께 기록한다 | 묘사의 정확성은 정량 평가하지 않았다 |
+| VLM의 출력 형식이 일정하지 않다 | LoRA 학습으로 파싱 성공률 0.999 | |
+| 범용 VLM이 유형 목록을 지키지 않는다 | 열거형 준수, 유형 정확도 0.177 → 0.274 | 유형 정확도가 여전히 낮다 |
+| 한 줄 설명으로는 시점을 알 수 없다 | 20초 창 단위 로그와 타임라인 표시 | 창 경계에 걸친 사건은 다루지 않는다 |
+| 자유 문장은 걸러 내거나 찾기 어렵다 | 이상 필터, 유형 필터, 임베딩 검색 | |
+| 외부 API는 비용과 영상 반출 문제가 있다 | 8B 모델을 자체 GPU 서버에서 서빙 | GPU 서버가 필요하다 |
 
-특정 영상에 대해 어떻게 감지되는지 시각적으로 보려면:
+### 5.2 적용 가능한 곳
+
+- **녹화 검토 보조.** 편의점, 무인 매장, 주차장처럼 녹화는 쌓이지만 상시 관제 인력이 없는 곳에서 이상으로 표시된 구간부터 확인하는 용도다. 재현율을 우선한 설정이므로 사람이 최종 확인하는 절차를 전제로 한다.
+- **사후 검색.** "가방을 들고 나감"처럼 기억나는 장면을 문장으로 찾는다. 시각과 카메라를 몰라도 된다.
+- **기록 요약.** 구조화된 필드를 집계해 시간대별 활동량이나 장소별 이벤트 수를 낼 수 있다.
+- **다른 도메인으로의 전환.** 스키마와 데이터 구축 절차는 영상과 라벨만 바꾸면 그대로 쓸 수 있다. 공장 안전, 요양 시설의 낙상 감지가 예다.
+
+자동 신고나 자동 차단처럼 사람의 확인 없이 조치하는 용도에는 현재의 정밀도가 맞지 않는다.
+
+### 5.3 한계
+
+- **정밀도 0.534.** 이상 판정의 절반가량이 오탐이다.
+- **유형 정확도 0.274.** 가까운 유형을 구분하지 못한다. Explosion, Shooting, Vandalism은 학습 클립이 각각 60개 미만이다.
+- **라벨 잡음.** 구간 라벨은 텍스트 모델이 문장 하나만 보고 붙였고 사람이 검수하지 않았다. 표본 312개에 대한 2차 의견에서 약 14%가 애매하거나 불일치였다.
+- **도메인 차이.** 학습 영상은 다양한 장소의 공개 감시 영상이고 해상도가 320×240이다. 고정된 실내 카메라에서의 성능은 확인하지 않았다.
+- **실제 카메라 미검증.** 구동 검증은 UCF-Crime 영상을 입력으로 한 것이다.
+- **통계적 검증 부족.** 학습 반복과 짝지은 검정을 하지 않았다.
+- **시간 해상도.** 창 안에서 프레임 8장만 본다. 1~2초의 짧은 동작은 선택되지 않을 수 있다.
+- **지연.** 로그는 녹화가 끝난 뒤에 생성된다. 실시간 경보가 아니다.
+
+### 5.4 다음에 할 일
+
+1. 실제 카메라로 정상 장면과 연출한 이상 상황을 촬영해 종단 간 검증을 한다.
+2. 자체 촬영 영상 수십 개에 로그를 만들어 추가 학습하고 도메인 차이의 변화를 측정한다.
+3. 구간 라벨링을 영상 단위로 바꾼다. 한 영상의 문장 전체를 순서대로 주면 앞 구간의 맥락이 필요한 사례를 처리할 수 있다.
+4. 창을 겹쳐 나누고 인접 창의 판정을 함께 쓴다.
+5. 묘사 필드의 품질을 UCA 문장과의 유사도나 대형 모델 심사로 평가한다.
+6. 클립별 결과로 McNemar 검정을 하고, 시드를 바꿔 학습을 반복해 분산을 측정한다.
+7. 녹화 도중에도 창이 닫힐 때마다 로그를 만들어 지연을 줄인다.
+
+---
+
+## 6. Reference
+
+[1] W. Sultani, C. Chen, M. Shah. "Real-World Anomaly Detection in Surveillance Videos." CVPR, 2018.
+
+[2] T. Yuan et al. "Towards Surveillance Video-and-Language Understanding: New Dataset, Baselines, and Challenges." CVPR, 2024.
+
+[3] Y. Tian et al. "Weakly-supervised Video Anomaly Detection with Robust Temporal Feature Magnitude Learning." ICCV, 2021.
+
+[4] P. Wu et al. "VadCLIP: Adapting Vision-Language Models for Weakly Supervised Video Anomaly Detection." AAAI, 2024.
+
+[5] L. Zanella et al. "Harnessing Large Language Models for Training-free Video Anomaly Detection." CVPR, 2024.
+
+[6] E. J. Hu et al. "LoRA: Low-Rank Adaptation of Large Language Models." ICLR, 2022.
+
+[7] Qwen Team. Qwen3-VL 모델 카드. https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct
+
+[8] Y. Zheng et al. "LlamaFactory: Unified Efficient Fine-Tuning of 100+ Language Models." ACL System Demonstrations, 2024.
+
+[9] W. Kwon et al. "Efficient Memory Management for Large Language Model Serving with PagedAttention." SOSP, 2023.
+
+[10] J. Chen et al. "BGE M3-Embedding: Multi-Lingual, Multi-Functionality, Multi-Granularity Text Embeddings Through Self-Knowledge Distillation." arXiv:2402.03216, 2024.
+
+[11] G. Hinton, O. Vinyals, J. Dean. "Distilling the Knowledge in a Neural Network." arXiv:1503.02531, 2015.
+
+데이터셋: UCF-Crime (https://www.crcv.ucf.edu/projects/real-world/), UCA (https://github.com/Xuange923/Surveillance-Video-Understanding). 각 데이터셋의 라이선스를 따르며 영상과 주석은 이 저장소에 포함하지 않는다.
+
+---
+
+## 부록: 실행 방법
+
+### 요구 사항
+
+- 클라이언트 PC: Python 3.11 이상, Node.js 18 이상, FFmpeg(선택), 웹캠 또는 영상 파일
+- GPU 서버: vLLM 0.33, 병합된 LoRA 모델, `server/requirements.txt`의 패키지
+
+### GPU 서버
+
+모델 서버를 띄운다.
 
 ```bash
-cd client/backend
-python debug.py /path/to/video.mp4 --speed 2
+GPU=0 MODEL_DIR=/path/to/qwen3vl8b-cctv ./scripts/run_server.sh vllm
 ```
 
-원본 / 그레이스케일 / 프레임 차이 / 이진화 4분할 창. `debug.py`는 실제 서비스(`camera.py`)와 동일한 함수를 사용하므로 여기서 파라미터를 튜닝한 결과가 그대로 서비스에 반영됩니다.
+다른 터미널에서 어댑터를 띄운다.
 
----
+```bash
+GPU=0 ./scripts/run_server.sh
+```
 
-## 운영 / 정리 정책
+### 클라이언트 PC
 
-- **30일 자동 삭제** — 매일 00:00 (`scheduler.py`). 30일 초과 녹화의 `.mp4` + `_raw.mp4` + `_vlm.mp4` + DB의 `recordings`·`motion_logs` 일괄 삭제, 빈 날짜 폴더도 제거.
-- **수동 삭제** — `/playback` 페이지의 🗑 버튼 또는 `DELETE /api/recordings/{id}`.
-- **DB 초기화** — 깨끗이 다시 시작하고 싶으면 `client/backend/cctv.db*` 와 `client/backend/recordings/` 안의 날짜 폴더 삭제. 백엔드 재실행 시 `init_db()`가 테이블 자동 재생성.
+서버가 다른 네트워크에 있으면 SSH 터널을 연다.
 
----
+```bash
+ssh -N -L 8010:localhost:8010 <계정>@<서버>
+```
 
-## 트러블슈팅
+환경변수 파일을 만들고 `VLM_SERVER_URL`을 확인한다.
 
-| 증상 | 확인 |
-|------|------|
-| 백엔드 `Address already in use` (8800) | 이전 uvicorn이 남아있음 → `pkill -f "uvicorn main:app"` 후 재실행. 다른 프로세스(VSCode 등)가 잡고 있으면 `lsof -nP -iTCP:8800 -sTCP:LISTEN`로 확인 |
-| 프론트에서 "서버에 연결 중..." 만 계속 | 백엔드 콘솔에 에러 없는지 + `curl http://localhost:8800/` 로 직접 확인 + 브라우저 DevTools `Network`/`Console` 탭 |
-| VLM 호출 시 타임아웃/연결 거부 | ① SSH 터널(`ssh -N -L 8010:localhost:8010 ...`)이 살아 있는지 ② 서버 tmux에서 어댑터(:8010)와 vLLM(:8002)이 둘 다 떠 있는지 (`curl localhost:8010/health`의 `vllm` 값) ③ 긴 녹화는 창 수만큼 시간이 걸리므로 `VLM_TIMEOUT`을 늘릴 것(창당 ~2초) |
-| 1~2초짜리 짧은 녹화가 잔뜩 생김 | 백엔드가 도중에 재시작되는 중 (`--reload` 가 파일 변화 감지 등). `--reload` 빼고 실행 |
-| 로그에 "움직임 감지됨"만 나오고 실제 설명이 없음 | `VLM_SERVER_URL` 미설정이거나 VLM 호출이 모두 실패하는 상태. 백엔드 콘솔의 `[VLM] ...` 로그 확인 |
-| 영상이 브라우저에서 안 재생됨 | mp4v 코덱으로 저장되고 FFmpeg가 없어 remux 실패한 경우. `brew install ffmpeg` 후 재실행. (avc1을 직접 쓸 수 있는 환경이면 FFmpeg 불필요) |
+```bash
+cp .env.example .env
+```
 
----
+백엔드와 프론트엔드를 함께 실행한다.
 
-## 라이선스 / 데이터 출처
+```bash
+./scripts/run_client.sh
+```
 
-- 코드: 캡스톤 프로젝트 내부 사용.
-- 테스트에 사용한 외부 영상(공개 라이브캠, UCF-Crime 등)은 각 출처의 라이선스를 따르며, 본 시스템은 **로컬 처리·실험 목적**으로만 사용합니다.
+브라우저에서 http://localhost:5173 을 연다.
+
+`VLM_SERVER_URL`을 비워 두면 VLM 없이 녹화와 재생만 동작한다. 카메라 대신 영상 파일을 입력으로 쓰려면 `.env`의 `CAMERA_SOURCE`에 경로를 적는다.
+
+### 화면
+
+| 경로 | 내용 |
+|---|---|
+| `/live` | 실시간 영상과 움직임 표시 |
+| `/playback` | 날짜별 녹화 목록, 재생, 타임라인의 창 구간, 구간 로그 |
+| `/logs` | 창 단위 로그, 이상만 보기, 자연어 검색 |
+| `/settings` | 녹화 종료까지의 침묵 시간 |
+
+API 명세, 환경변수, 문제 해결은 [개발 문서](docs/DEVELOPMENT.md)에 있다.
