@@ -1,13 +1,13 @@
 """
 uca_segments.csv  →  (1) 구간 병합·선별  →  (2) 구간마다 프레임 8장 추출
-                                              - change/ : 변화량 기반 선택 (메인)
-                                              - uniform/: 균등 샘플링 (비교군 C용)
+                                              - change/ : 변화량 기반 선택
+                                              - uniform/: 균등 샘플링
 출력:
   clips/manifest.csv        한 줄 = 클립 하나 (라벨, split, 프레임 폴더 경로)
   clips/frames/<clip_id>/change/f0..f7.jpg
   clips/frames/<clip_id>/uniform/f0..f7.jpg
 
-실행 위치: ~/Videos      python3 make_clips.py
+실행 위치: 데이터 루트      python3 make_clips.py
 필요: pip install opencv-python-headless numpy
 """
 import csv, random, os, sys

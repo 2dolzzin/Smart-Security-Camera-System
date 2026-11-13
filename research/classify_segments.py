@@ -3,7 +3,7 @@ uca_segments.csv 의 seg_is_anomaly 열을 채운다.
  - 정상 영상(category == Normal) 구간: 전부 0 (UCF-Crime 라벨상 범죄 없음)
  - 이상 영상 구간: 문장을 Qwen3-8B(vLLM, localhost:8000)에 보내 anomaly / normal 판정
 
-실행 위치: ~/Videos   (vLLM 서버가 먼저 떠 있어야 함)
+실행 위치: 데이터 루트   (vLLM 서버가 먼저 떠 있어야 함)
     python3 classify_segments.py
 출력: uca_segments.csv 를 덮어쓰고, seg_is_anomaly / seg_label_raw 열이 채워짐
 """

@@ -1,17 +1,18 @@
 """
-ingest_video.py — 임의의 영상 파일을 "녹화된 것처럼" 등록하고 VLM 로그까지 만든다 (테스트·데모용).
+ingest_video.py
+영상 파일을 녹화로 등록하고 VLM 로그를 생성하는 명령행 도구.
 
-카메라·움직임 감지를 건너뛰고, 영상을 recordings/ 에 복사 → recordings 테이블에 넣고
-→ ai_describer.describe_recording() 으로 전처리 + VLM 어댑터 호출 + 창 단위 로그 저장.
-끝나면 /playback 과 /logs 에 바로 보인다 (백엔드가 떠 있어도 되고 꺼져 있어도 됨 — 같은 cctv.db 를 씀).
+카메라 캡처와 움직임 감지를 거치지 않는다. 영상을 recordings/ 에 복사하고
+recordings 테이블에 등록한 뒤 ai_describer.describe_recording() 을 호출한다.
+백엔드와 같은 cctv.db 를 사용하므로 결과는 /playback 과 /logs 에 표시된다.
 
-사용 (client/backend 에서, venv 활성화 후):
+사용 (client/backend 에서):
   VLM_SERVER_URL=http://localhost:8010 python ingest_video.py 영상1.mp4 [영상2.mp4 ...]
   옵션:
-    --at "2026-11-10 14:30:00"   녹화 시작 시각 지정 (기본: 지금 - 영상 길이)
-    --no-copy                    복사하지 않고 원본 경로를 그대로 등록 (파일을 옮기면 재생 안 됨)
+    --at "2026-11-10 14:30:00"   녹화 시작 시각 (기본: 현재 시각 - 영상 길이)
+    --no-copy                    복사하지 않고 원본 경로를 등록
 
-브라우저 재생은 H.264 mp4 여야 한다. 다른 코덱이면 먼저:
+브라우저에서 재생하려면 H.264 mp4 여야 한다. 변환 예:
   ffmpeg -i in.avi -c:v libx264 -pix_fmt yuv420p -movflags +faststart out.mp4
 """
 

@@ -4,7 +4,7 @@ clips/teacher_logs.jsonl  →  LLaMA-Factory 학습 데이터
   lf/data/cctv_test.json                  (UCF 공식 test, 평가 전용)
   lf/data/dataset_info.json
 
-실행 위치: ~/Videos      python3 convert_lf.py
+실행 위치: 데이터 루트      python3 convert_lf.py
 """
 import json, random
 from pathlib import Path

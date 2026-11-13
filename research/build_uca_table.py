@@ -2,7 +2,7 @@
 UCA(UCF-Crime Annotation) JSON 3개 + UCF-Crime 공식 split 목록을 합쳐
 구간 단위 표(CSV)를 만든다.
 
-실행 위치: ~/Videos  (UCF_Crime/ 과 Surveillance-Video-Understanding/ 가 있는 곳)
+실행 위치: 데이터 루트 (UCF_Crime/ 과 Surveillance-Video-Understanding/ 가 있는 디렉토리)
     python3 build_uca_table.py
 
 출력: uca_segments.csv  (한 줄 = UCA 구간 하나)
