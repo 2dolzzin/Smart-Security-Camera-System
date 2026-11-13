@@ -1,67 +1,46 @@
 """
-server/app.py — VLM 어댑터 서버 (GPU 서버 `hail-pro6000`에서 실행)
+server/app.py
+VLM 어댑터 서버. GPU 서버에서 실행한다.
 
-캡스톤 때의 Qwen2.5-VL transformers 서버를, 졸업작품에서 LoRA 학습한
-Qwen3-VL-8B CCTV 모델(vLLM, :8002)을 호출하는 얇은 어댑터로 교체한 것.
-클라이언트(client/backend/ai_describer.py)가 쓰는 `POST /describe` 계약은 그대로 두고,
-구조화 로그(`logs[]`)와 검색용 임베딩을 추가로 돌려준다.
+vLLM 으로 서빙 중인 Qwen3-VL-8B LoRA 병합 모델(OpenAI 호환 API)을 호출하여
+영상 파일을 창(window) 단위의 구조화 JSON 로그로 변환하고,
+로그 텍스트의 bge-m3 임베딩을 함께 반환한다.
 
-────────────────────────────────────────────────────────
-실행 (서버, conda env `cctv`, tmux 안에서)
-────────────────────────────────────────────────────────
-  # 1) vLLM 모델 서버가 먼저 떠 있어야 한다 (nvidia-smi로 빈 GPU 확인 후)
-  CUDA_VISIBLE_DEVICES=1 vllm serve ~/Videos/lf/models/qwen3vl8b-cctv --port 8002 \
-      --max-model-len 8192 --limit-mm-per-prompt '{"image":8}' --gpu-memory-utilization 0.8
-
-  # 2) 어댑터 (bge-m3 임베딩 모델은 vLLM과 같은 GPU에 올려도 됨, ~1.2 GB)
-  cd ~/Smart-Security-Camera-System/server
-  CUDA_VISIBLE_DEVICES=1 uvicorn app:app --host 0.0.0.0 --port 8010
-  #   SSH 터널로만 접속할 거면 --host 127.0.0.1
-
-  # 3) 확인
-  curl http://localhost:8010/health
-  curl -F file=@~/Videos/UCF_Crime/Robbery/Robbery050_x264.mp4 http://localhost:8010/describe
-
-────────────────────────────────────────────────────────
-엔드포인트
-────────────────────────────────────────────────────────
+엔드포인트:
   GET  /health
-       → {"status":"ok","vllm":true,"model":"<vLLM 모델 id>","embed_model":"BAAI/bge-m3", ...}
-         vLLM이 죽어 있으면 "status":"degraded","vllm":false
+       → {"status": "ok|degraded", "vllm": bool, "model": str,
+          "embed_model": str|null, "embed_ready": bool, "window_sec": float}
+         vLLM 서버에 연결할 수 없으면 status 는 "degraded".
 
   POST /describe   (multipart/form-data)
-       file      : 영상 파일 (필수) — 클라이언트가 전처리한 360p·4fps mp4
-       question  : (선택) 하위호환용으로 받기만 하고 **무시**한다.
-                   학습 때 쓴 INSTRUCTION과 프롬프트가 같아야 하기 때문.
-       window_sec: (선택) 창 길이 덮어쓰기(3~120초). 없으면 WINDOW_SEC(기본 20)
-       → {
-           "description": "<첫 로그의 summary>",          # 기존 클라이언트 호환
-           "logs": [
-             {"window_start": 0.0, "window_end": 20.0,
-              "log": {"scene":..., "objects":[...], "action":..., "is_anomaly":"정상|이상",
-                      "anomaly_type":"...|None", "summary":...},   # 파싱 실패면 null
-              "raw": "<모델 원문>",
-              "embedding": [1024 floats]                   # bge-m3(summary + " " + action), 파싱 실패면 null
-             }, ...],
-           "duration_sec": 56.7, "n_windows": 3, "window_sec": 20.0, "elapsed_sec": 5.9
-         }
-       영상은 WINDOW_SEC(기본 20초) 창으로 쪼개 창마다 로그 하나. 3초 미만 꼬리 창은 앞 창에 합친다.
-       * 학습 클립은 3~60초(평균 17초)였고, 60초 창으로 넣으면 짧은 사건이 묻혀 놓친다
-         (Robbery050·Fighting003·Shoplifting001 모두 60초 창에선 정상, 20초 창에선 검출.
-          정상 영상 2편 17창은 20초에서도 오탐 0). 그래서 기본을 20초로 둔다.
+       file       : 영상 파일 (필수)
+       question   : 선택. 수신만 하고 사용하지 않는다. 프롬프트는 INSTRUCTION 으로 고정.
+       window_sec : 선택. 창 길이(3~120초). 없으면 WINDOW_SEC.
+       → {"description": 첫 로그의 summary,
+          "logs": [{"window_start": float, "window_end": float,
+                    "log": {scene, objects, action, is_anomaly, anomaly_type, summary} | null,
+                    "raw": 모델 출력 원문,
+                    "embedding": [1024 floats] | null}, ...],
+          "duration_sec": float, "n_windows": int, "window_sec": float, "elapsed_sec": float}
+         영상을 window_sec 길이의 창으로 나누어 창마다 로그 1개를 만든다.
+         MIN_TAIL_SEC 보다 짧은 마지막 창은 앞 창에 합친다.
+         JSON 파싱에 실패한 창은 log 와 embedding 이 null.
 
-  POST /embed      (json {"text": "..."})
-       → {"embedding": [1024 floats]}     클라이언트의 검색 질의 임베딩용
+  POST /embed      (application/json {"text": str})
+       → {"embedding": [1024 floats]}
 
-환경변수(선택):
-  VLLM_URL        기본 http://localhost:8002
-  VLLM_MODEL      기본: 기동 시 {VLLM_URL}/v1/models 에서 첫 모델 id를 읽음
+환경변수:
+  VLLM_URL        vLLM 서버 주소. 기본 http://localhost:8002
+  VLLM_MODEL      모델 id. 비우면 기동 시 {VLLM_URL}/v1/models 의 첫 모델을 사용
   VLLM_TIMEOUT    vLLM 요청 타임아웃(초). 기본 180
-  WINDOW_SEC      창 길이. 기본 20
-  MIN_TAIL_SEC    이보다 짧은 꼬리 창은 앞 창에 합침. 기본 3
-  EMBED_MODEL     기본 BAAI/bge-m3
-  EMBED_DEVICE    기본 cuda(가능하면) / cpu
-  EMBED_DISABLE   "1"이면 임베딩 모델을 안 올림 (embedding은 null, /embed는 503)
+  WINDOW_SEC      창 길이(초). 기본 20
+  MIN_TAIL_SEC    이보다 짧은 마지막 창은 앞 창에 합친다. 기본 3
+  EMBED_MODEL     임베딩 모델. 기본 BAAI/bge-m3
+  EMBED_DEVICE    임베딩 모델 장치. 기본 cuda(사용 가능 시) / cpu
+  EMBED_DISABLE   "1" 이면 임베딩 모델을 로드하지 않는다 (embedding 은 null, /embed 는 503)
+
+실행:
+  uvicorn app:app --host 0.0.0.0 --port 8010
 """
 
 import base64
@@ -93,7 +72,7 @@ EMBED_DISABLE = os.getenv("EMBED_DISABLE", "0") == "1"
 N_FRAMES = 8
 MAX_TOKENS = 400
 
-# 학습 데이터(convert_lf.py) 및 평가(eval_test.py)와 **글자 단위로 동일**해야 한다.
+# 학습(research/convert_lf.py)과 평가(research/eval_test.py)에 사용한 프롬프트와 동일한 문자열.
 INSTRUCTION = """다음은 CCTV 영상에서 시간순으로 추출한 프레임 8장이다. 아래 JSON 형식으로 로그를 작성하라. 화면에 보이는 것만 기술하고, 의도나 감정은 추측하지 않는다.
 {"scene": 장소 유형, "objects": [{"type": "사람|차량|동물|물건", "count": 정수, "appearance": 외형}], "action": 관찰 가능한 동작 1문장, "is_anomaly": "정상|이상", "anomaly_type": "Abuse|Arrest|Arson|Assault|Burglary|Explosion|Fighting|RoadAccidents|Robbery|Shooting|Shoplifting|Stealing|Vandalism|None", "summary": 1문장 요약}"""
 
@@ -139,13 +118,13 @@ def vllm_describe(frames) -> str:
 
 
 def parse_log(txt: str):
-    """모델 원문 → dict. 실패하면 None. eval_test.py와 같은 기준(중괄호 블록 + 필수 키)."""
+    """모델 출력 원문에서 JSON 블록을 추출해 dict 로 반환한다. 필수 키가 없거나 파싱에 실패하면 None."""
     try:
         m = re.search(r"\{.*\}", txt, re.S)
         d = json.loads(m.group(0))
         if "is_anomaly" not in d or "anomaly_type" not in d:
             return None
-        # 열거형 정규화(학습 모델은 거의 항상 준수하지만 방어적으로)
+        # 열거형 필드를 허용 값으로 정규화
         d["is_anomaly"] = "이상" if str(d["is_anomaly"]).strip() == "이상" else "정상"
         if d["anomaly_type"] not in ANOMALY_TYPES:
             d["anomaly_type"] = "None"
@@ -160,9 +139,10 @@ def parse_log(txt: str):
         return None
 
 
-# ───────────────────── 프레임 추출 (make_clips.py와 동일 규칙) ─────────────────────
+# ───────────────────────── 프레임 추출 ─────────────────────────
 def pick_change_frames(frames, scores):
-    """구간을 8등분, 각 빈에서 프레임 차분이 최대인 1장. 프레임이 8장 미만이면 반복해서 채운다."""
+    """프레임 열을 N_FRAMES 개 구간으로 등분하고 각 구간에서 차분 점수가 최대인 프레임을 고른다.
+    프레임 수가 N_FRAMES 미만이면 같은 프레임을 반복해 채운다."""
     n = len(frames)
     if n == 0:
         return []
@@ -176,8 +156,9 @@ def pick_change_frames(frames, scores):
 
 def extract_windows(video_path: str, window_sec: float = None):
     """
-    영상을 순차 디코드하면서 WINDOW_SEC 단위로 끊어, 창마다 (start, end, frames8)을 돌려준다.
-    메모리를 아끼려고 창 하나 분량만 들고 있는다. 차분 점수는 창마다 새로 시작(학습 클립과 동일).
+    영상을 순차 디코드하며 window_sec 단위의 창으로 나눈다.
+    반환: ([(start_sec, end_sec, frames)], duration_sec, fps). frames 는 창마다 N_FRAMES 장.
+    차분 점수는 160x120 그레이스케일 프레임 간 절대차의 평균이며 창마다 새로 계산한다.
     """
     window_sec = window_sec or WINDOW_SEC
     cap = cv2.VideoCapture(video_path)
@@ -187,7 +168,7 @@ def extract_windows(video_path: str, window_sec: float = None):
     if fps <= 0 or fps > 240:
         fps = 4.0
 
-    windows = []            # [(start, end, frames, scores)]
+    windows = []   # [(start, end, frames, scores)]
     cur_frames, cur_scores, prev = [], [], None
     cur_start = 0.0
     idx = 0
@@ -212,7 +193,7 @@ def extract_windows(video_path: str, window_sec: float = None):
     if not windows:
         raise RuntimeError("디코드된 프레임이 없음")
 
-    # 짧은 꼬리 창은 앞 창에 합친다
+    # MIN_TAIL_SEC 보다 짧은 마지막 창은 앞 창에 합친다
     if len(windows) >= 2 and (windows[-1][1] - windows[-1][0]) < MIN_TAIL_SEC:
         s0, _, f0, sc0 = windows[-2]
         _, e1, f1, sc1 = windows[-1]
@@ -223,7 +204,7 @@ def extract_windows(video_path: str, window_sec: float = None):
 
 
 # ───────────────────────── 임베딩 (bge-m3) ─────────────────────────
-# sentence-transformers 없이 transformers로 직접 (dense = CLS 토큰, L2 정규화 — bge-m3 공식 dense 임베딩과 동일).
+# transformers AutoModel 로 로드한다. dense 임베딩 = CLS 토큰 은닉 상태를 L2 정규화한 벡터.
 _embed_lock = threading.Lock()
 _tok = _emb = None
 
@@ -253,7 +234,7 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 
 
 # ───────────────────────── FastAPI ─────────────────────────
-app = FastAPI(title="CCTV VLM Adapter (Qwen3-VL-8B LoRA via vLLM)", version="2.0.0")
+app = FastAPI(title="CCTV VLM Adapter", version="2.0.0")
 
 
 @app.on_event("startup")
@@ -295,8 +276,6 @@ def embed(req: EmbedReq):
 @app.post("/describe")
 def describe(file: UploadFile = File(...), question: str | None = Form(None),
              window_sec: float | None = Form(None)):
-    # question은 하위호환으로 받기만 한다 — 학습 프롬프트와 동일해야 하므로 사용하지 않음
-    # window_sec: 창 길이 덮어쓰기(3~120초). 없으면 WINDOW_SEC
     if window_sec is not None and not (3 <= window_sec <= 120):
         raise HTTPException(status_code=400, detail="window_sec는 3~120 사이")
     t0 = time.perf_counter()

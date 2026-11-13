@@ -24,8 +24,8 @@ from ai_describer import describe_recording
 from database import insert_motion_log, get_setting, set_setting
 
 CAMERA_INDEX        = 0
-# 테스트용: CAMERA_SOURCE 환경변수에 영상 파일 경로(또는 RTSP URL 등)를 주면
-# 웹캠 대신 그 영상을 입력으로 사용한다. 파일이면 끝까지 가면 처음부터 반복 재생.
+# CAMERA_SOURCE 환경변수에 영상 파일 경로 또는 스트림 URL 을 지정하면 웹캠 대신 사용한다.
+# 파일 입력은 끝에 도달하면 처음부터 반복 재생한다.
 CAMERA_SOURCE       = os.getenv("CAMERA_SOURCE", "").strip() or None
 FPS_TARGET          = 15
 FRAME_INTERVAL      = 1.0 / FPS_TARGET
@@ -85,7 +85,7 @@ class MotionSession:
         # recording_id는 stop_recording() 호출 전에 가져와야 함
         recording_id = self._recorder.current_recording_id or 0
 
-        # 로그 먼저 저장 (description 은 영상 전처리 + VLM 후에 채움)
+        # 로그 행을 먼저 만들고, 설명은 VLM 처리 후 갱신한다
         log_id = insert_motion_log(
             recording_id=recording_id,
             detected_at=started_at,
@@ -95,7 +95,7 @@ class MotionSession:
             description="",
         )
 
-        # 녹화 mp4 가 완성되면(백그라운드 스레드) 전처리 → VLM 설명 생성 → 로그 갱신
+        # 녹화 파일이 완성되면 백그라운드 스레드에서 VLM 로그를 생성한다
         self._recorder.stop_recording(
             on_complete=lambda final_path: describe_recording(log_id, final_path)
         )
@@ -170,7 +170,7 @@ class CameraManager:
         if self._running:
             return
         self._running = True
-        self._load_silence_sec()   # init_db() 이후이므로 settings 테이블 존재
+        self._load_silence_sec()
         print(f"[Camera] 무동작 대기 시간: {self.silence_sec}초")
 
         source = CAMERA_SOURCE if CAMERA_SOURCE is not None else CAMERA_INDEX
@@ -184,8 +184,7 @@ class CameraManager:
             asyncio.create_task(self._demo_loop())
             return
 
-        # 파일 소스면 원본 영상의 fps 그대로 재생 (= 실시간 카메라처럼 동작).
-        # 그래야 "마지막 움직임 후 N초 정적" 의 N이 영상 기준 초와 일치한다.
+        # 파일 입력은 원본 fps 로 재생하여 침묵 시간 계산이 영상 시간과 일치하도록 한다.
         if self._is_file_source:
             fps = self._cap.get(cv2.CAP_PROP_FPS)
             self._src_fps = fps if (fps and 1.0 <= fps <= 120.0) else float(FPS_TARGET)
@@ -207,7 +206,7 @@ class CameraManager:
             ret, frame = await loop.run_in_executor(None, self._cap.read)
             if not ret:
                 if self._is_file_source:
-                    # 영상 끝 → 처음으로 되감아 반복 (되감기 시 프레임 차이가 튀지 않게 detector 초기화)
+                    # 영상 끝에서 처음으로 되감고 감지기의 이전 프레임을 초기화한다
                     self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     self._detector.reset()
                     await asyncio.sleep(0.05)

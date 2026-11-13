@@ -1,10 +1,11 @@
 """
 routers/recordings.py
+녹화 목록/상세 조회, 삭제, 영상 스트리밍 API.
 
-[수정 내용]
-- 목록 조회: ended_at 필터 제거 → 실제 MP4 파일이 존재하면 표시
-  (FFmpeg 변환 완료 = 파일 존재, 미완료 = 파일 없음으로 자연스럽게 구분)
-- 영상 스트리밍: HTTP Range 요청 완전 지원 (seek 가능)
+  GET    /api/recordings?date=YYYY-MM-DD   녹화 목록 (최종 mp4 파일이 존재하는 것만)
+  GET    /api/recordings/{id}              녹화 메타데이터 + 연결된 로그
+  DELETE /api/recordings/{id}              영상 파일, DB 레코드, 연결된 로그 삭제
+  GET    /api/recordings/{id}/video        영상 스트리밍 (HTTP Range 지원)
 """
 
 from pathlib import Path
@@ -27,13 +28,12 @@ router = APIRouter(prefix="/api/recordings")
 @router.get("")
 def list_recordings(date: Optional[str] = Query(None, description="YYYY-MM-DD")):
     """
-    녹화 목록 조회.
-    실제 MP4 파일이 존재하는 것만 반환 (FFmpeg 변환 완료 기준).
+    녹화 목록 조회. 최종 mp4 파일이 존재하는 녹화만 반환한다.
     """
     rows = get_recordings(date_str=date)
     completed = [
         r for r in rows
-        if Path(r["filepath"]).exists()   # 파일 존재 = 변환 완료
+        if Path(r["filepath"]).exists()
     ]
     return {"recordings": completed, "total": len(completed)}
 
@@ -65,7 +65,7 @@ def delete_recording(recording_id: int):
             filepath.unlink()
         except OSError as e:
             raise HTTPException(status_code=500, detail=f"파일 삭제 실패: {e}")
-    # 부산물(_raw.mp4: 변환 전 임시본 / _vlm.mp4: 전처리본)도 같이 정리
+    # 부산물 삭제 (_raw.mp4: remux 전 임시 파일, _vlm.mp4: VLM 입력용 전처리 파일)
     filepath.with_name(f"{filepath.stem}_raw.mp4").unlink(missing_ok=True)
     filepath.with_name(f"{filepath.stem}_vlm.mp4").unlink(missing_ok=True)
 
@@ -78,8 +78,7 @@ def delete_recording(recording_id: int):
 @router.get("/{recording_id}/video")
 async def stream_video(recording_id: int, request: Request):
     """
-    영상 파일 스트리밍 — HTTP Range 완전 지원.
-    브라우저 <video> seek(구간 이동) 정상 동작을 위해 필수.
+    영상 파일 스트리밍. Range 헤더가 있으면 해당 바이트 구간만 206 으로 응답한다.
     """
     row = get_recording_by_id(recording_id)
     if not row:

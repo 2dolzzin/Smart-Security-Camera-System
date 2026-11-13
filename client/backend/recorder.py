@@ -1,14 +1,12 @@
 """
 recorder.py - 이벤트 기반 녹화 모듈
 
-[핵심 전략]
-1. OpenCV로 avc1(H.264) 코덱 직접 시도
-2. avc1 실패(Mac 일부 환경) → mp4v로 저장 후
-   FFmpeg -c:v copy (재인코딩 없이 컨테이너만 remux) 로 브라우저 호환 MP4 생성
-3. FFmpeg도 없으면 mp4v 파일을 그대로 최종 파일로 사용
-   (일부 브라우저에서 재생 안 될 수 있지만 파일은 남음)
+코덱 선택:
+1. OpenCV 로 avc1(H.264) 저장을 시도한다.
+2. avc1 을 쓸 수 없으면 mp4v 로 저장한 뒤 FFmpeg 로 컨테이너를 remux 한다 (-c copy, +faststart).
+3. FFmpeg 가 없으면 mp4v 파일을 그대로 최종 파일로 사용한다.
 
-로그 1개 = 영상 1개 (MotionSession이 start/stop 시점 결정)
+녹화 시작/종료 시점은 camera.MotionSession 이 결정한다.
 """
 
 import subprocess
@@ -68,7 +66,7 @@ def _finalize_file(tmp_path: Path, final_path: Path,
     백그라운드 스레드:
     avc1이면 rename만, mp4v이면 FFmpeg remux 시도.
     어떤 경우든 최종 파일이 생기도록 보장.
-    최종 파일이 준비되면 on_complete(final_path) 콜백 호출 (VLM 설명 생성 등).
+    최종 파일이 준비되면 on_complete(final_path) 콜백을 호출한다.
     """
     def _update_db():
         if final_path.exists() and final_path.stat().st_size > 0:
@@ -98,7 +96,7 @@ def _finalize_file(tmp_path: Path, final_path: Path,
 
     # ── mp4v: FFmpeg remux 시도 ──
     # -movflags +faststart : moov atom을 앞으로 → 브라우저 스트리밍 가능
-    # -c copy              : 재인코딩 없이 컨테이너만 변환 (빠름, 실패 적음)
+    # -c copy              : 재인코딩 없이 컨테이너만 변환
     cmd = [
         "ffmpeg", "-y",
         "-i", str(tmp_path),
@@ -142,7 +140,7 @@ class Recorder:
         self._final_path: Optional[Path] = None
         self._tmp_path: Optional[Path] = None
         self._is_recording: bool = False
-        self.fps: float = float(FPS)   # 녹화 파일 fps (입력 영상 fps에 맞춰 외부에서 조정 가능)
+        self.fps: float = float(FPS)   # 녹화 파일 fps
 
     def _make_paths(self, dt: datetime) -> tuple[Path, Path]:
         date_dir = RECORDINGS_DIR / dt.strftime("%Y-%m-%d")
@@ -163,7 +161,7 @@ class Recorder:
             str(self._tmp_path), _FOURCC, self.fps, (WIDTH, HEIGHT)
         )
         if not self._writer.isOpened():
-            print(f"[Recorder] ⚠️ VideoWriter 열기 실패 (코덱: {_CODEC_NAME})")
+            print(f"[Recorder] VideoWriter 열기 실패 (코덱: {_CODEC_NAME})")
             self._writer = None
             return False
 

@@ -1,9 +1,7 @@
 """
 debug.py
-움직임 감지 과정 시각화 실험 스크립트.
-
-실제 서비스(motion_detector.py)와 동일한 함수를 사용하므로
-파라미터 조정 결과가 그대로 서비스에 반영됨.
+움직임 감지 단계별 결과를 4개 창으로 시각화하는 스크립트.
+motion_detector.py 의 함수와 파라미터를 그대로 사용한다.
 
 실행 방법:
     python debug.py 영상파일.mp4
@@ -25,7 +23,6 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-# 실제 서비스와 동일한 함수 사용
 from motion_detector import (
     to_gray,
     calc_diff,
@@ -93,7 +90,7 @@ def run(video_path: str, speed: float = 1.0):
                 break
             frame_idx += 1
 
-        # ── 단계별 처리 (실제 서비스와 동일한 함수) ──
+        # ── 단계별 처리 ──
         curr_gray = to_gray(frame)
 
         if prev_gray is None:
@@ -130,7 +127,7 @@ def run(video_path: str, speed: float = 1.0):
         )
 
         # ── 창 3: 프레임 차이 ──
-        # 차이값을 보기 좋게 3배 증폭
+        # 표시용으로 차이값을 3배 증폭
         diff_bright = cv2.convertScaleAbs(diff, alpha=3.0)
         diff_disp   = put_info(
             cv2.cvtColor(diff_bright, cv2.COLOR_GRAY2BGR),

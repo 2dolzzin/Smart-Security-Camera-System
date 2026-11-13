@@ -1,7 +1,6 @@
 """
 scheduler.py
-매일 자정에 30일 이상 된 녹화 파일을 자동 삭제하는 스케줄러.
-APScheduler 사용.
+매일 자정에 보관 기간(RETENTION_DAYS)이 지난 녹화 파일과 DB 레코드를 삭제하는 스케줄러.
 """
 
 import os

@@ -10,8 +10,7 @@ OpenCV 기반 움직임 감지 모듈.
   find_motion()   : 윤곽선 탐지 + 면적 필터
 
 MotionDetector.detect() 는 위 함수들을 순서대로 호출.
-debug.py 에서도 동일한 함수를 사용하므로
-파라미터 변경 시 실제 서비스와 실험 결과가 항상 일치함.
+debug.py 도 같은 함수를 사용한다.
 """
 
 import cv2
@@ -20,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-# ── 파라미터 (여기서 조정하면 서비스 + 실험 모두 반영) ──
+# ── 파라미터 ──
 BLUR_SIZE        = (21, 21)
 THRESHOLD_VALUE  = 25       # 이진화 임계값 (높을수록 둔감)
 MIN_CONTOUR_AREA = 1500     # 최소 움직임 면적 (높을수록 둔감)
@@ -32,7 +31,7 @@ DILATE_ITER      = 2        # 팽창 반복 횟수
 def to_gray(frame: np.ndarray) -> np.ndarray:
     """
     1단계: BGR → 그레이스케일 + 가우시안 블러
-    블러는 카메라 노이즈로 인한 오탐지를 줄여줌
+    블러로 센서 노이즈에 의한 픽셀 변화를 완화한다
     """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     gray = cv2.GaussianBlur(gray, BLUR_SIZE, 0)
@@ -42,7 +41,6 @@ def to_gray(frame: np.ndarray) -> np.ndarray:
 def calc_diff(prev_gray: np.ndarray, curr_gray: np.ndarray) -> np.ndarray:
     """
     2단계: 이전 프레임과 현재 프레임의 절댓값 차이 계산
-    움직임이 있는 픽셀일수록 차이값이 큼
     """
     return cv2.absdiff(prev_gray, curr_gray)
 
@@ -87,18 +85,17 @@ def find_motion(
 
 @dataclass
 class RawMotion:
-    """단순 감지 신호 — 프레임 + 강도"""
+    """움직임 감지 결과"""
     detected_at: datetime
     intensity: float         # 변화 픽셀 비율 (0.0 ~ 1.0)
-    frame: np.ndarray        # 감지 시점 프레임 (AI 분석용)
+    frame: np.ndarray        # 감지 시점 프레임
 
 
-# ── 실제 서비스용 클래스 ────────────────────────────────
+# ── 감지기 클래스 ───────────────────────────────────────
 
 class MotionDetector:
     """
-    실제 서비스(camera.py)에서 사용.
-    단계별 함수를 순서대로 호출하여 RawMotion 반환.
+    단계별 함수를 순서대로 호출하여 움직임이 있으면 RawMotion 을 반환한다.
     """
 
     def __init__(self):

@@ -19,7 +19,7 @@ export const getLogs = (period = 'day', anomalyOnly = false, type = null) =>
   api.get('/logs', { params: { period, ...(anomalyOnly ? { anomaly: 1 } : {}), ...(type ? { type } : {}) } })
      .then(r => r.data)
 
-// 자연어 검색 — 질의 임베딩은 VLM 서버, 유사도는 백엔드(numpy)
+// 자연어 검색 (유사도순 결과)
 export const searchLogs = (q, period = 'month', anomalyOnly = false, topK = 20) =>
   api.get('/logs/search', { params: { q, period, top_k: topK, ...(anomalyOnly ? { anomaly: 1 } : {}) } })
      .then(r => r.data)

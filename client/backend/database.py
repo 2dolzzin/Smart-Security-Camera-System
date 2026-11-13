@@ -45,7 +45,7 @@ def init_db():
             intensity               REAL,
             timestamp_offset_sec    REAL,
             description             TEXT,
-            -- VLM 구조화 로그 (졸업작품에서 추가). 녹화 1개 → 창(window) 단위 로그 N개
+            -- VLM 구조화 로그. 녹화 1개에 창(window) 단위 로그가 여러 개 연결된다
             window_start            REAL,
             window_end              REAL,
             is_anomaly              INTEGER DEFAULT 0,
@@ -75,7 +75,7 @@ def init_db():
     print("[DB] 초기화 완료:", DB_PATH)
 
 
-# 기존 DB(캡스톤 버전)에 없는 열을 추가한다. 이미 있으면 건너뜀.
+# motion_logs 에 추가할 VLM 로그 열. 기존 DB 에 없는 열만 ALTER TABLE 로 추가한다.
 VLM_COLUMNS = [
     ("window_start", "REAL"), ("window_end", "REAL"),
     ("is_anomaly", "INTEGER DEFAULT 0"), ("anomaly_type", "TEXT"),
@@ -114,7 +114,7 @@ def blob_to_embedding(blob) -> np.ndarray | None:
 
 
 def _row_to_log(row) -> dict:
-    """motion_logs 행 → API용 dict. embedding(BLOB)은 빼고 objects_json은 파싱해서 objects로."""
+    """motion_logs 행을 API 응답용 dict 로 변환한다. embedding 은 제외하고 objects_json 은 objects 리스트로 파싱한다."""
     d = dict(row)
     d.pop("embedding", None)
     try:
@@ -224,9 +224,9 @@ def update_motion_log_description(log_id: int, description: str):
 
 
 def _vlm_fields(log: dict, window_start: float, window_end: float, embedding) -> dict:
-    """VLM 어댑터의 로그 JSON 1개 → motion_logs 열 값."""
+    """VLM 로그 JSON 1개를 motion_logs 열 값 dict 로 변환한다."""
     return {
-        "description": log.get("summary") or "움직임 감지됨",   # 기존 UI 호환
+        "description": log.get("summary") or "움직임 감지됨",
         "window_start": float(window_start),
         "window_end": float(window_end),
         "is_anomaly": 1 if log.get("is_anomaly") == "이상" else 0,
@@ -240,7 +240,7 @@ def _vlm_fields(log: dict, window_start: float, window_end: float, embedding) ->
 
 
 def update_motion_log_vlm(log_id: int, log: dict, window_start: float, window_end: float, embedding=None):
-    """세션 종료 시 만들어 둔 로그 행(첫 창)에 VLM 결과를 채운다. timestamp_offset_sec도 창 시작으로 맞춘다."""
+    """기존 로그 행에 첫 창의 VLM 결과를 기록한다. timestamp_offset_sec 과 duration_sec 도 창 기준으로 갱신한다."""
     f = _vlm_fields(log, window_start, window_end, embedding)
     f["timestamp_offset_sec"] = f["window_start"]
     f["duration_sec"] = f["window_end"] - f["window_start"]
@@ -253,7 +253,7 @@ def update_motion_log_vlm(log_id: int, log: dict, window_start: float, window_en
 
 def insert_window_log(recording_id: int, started_at: datetime, intensity: float,
                       log: dict, window_start: float, window_end: float, embedding=None) -> int:
-    """두 번째 창부터는 새 로그 행을 만든다. detected_at = 녹화 시작 + 창 시작."""
+    """창 1개의 VLM 결과를 새 로그 행으로 추가한다. detected_at 은 녹화 시작 시각 + 창 시작 오프셋."""
     from datetime import timedelta
     f = _vlm_fields(log, window_start, window_end, embedding)
     detected_at = (started_at + timedelta(seconds=window_start)).isoformat()
@@ -310,8 +310,8 @@ def get_motion_logs(period: str = "day", anomaly_only: bool = False, anomaly_typ
 
 def search_motion_logs(query_vec, period: str = "month", anomaly_only: bool = False, top_k: int = 20):
     """
-    질의 임베딩과 로그 임베딩의 코사인 유사도 상위 top_k.
-    임베딩은 bge-m3 출력이 이미 L2 정규화돼 있으므로 내적 = 코사인. 로그 수천 개면 numpy로 ms 단위.
+    질의 임베딩과 로그 임베딩의 코사인 유사도가 높은 순으로 top_k 개를 반환한다.
+    각 결과에 score(유사도)를 포함한다.
     """
     where, params = _period_clause(period)
     where += " AND ml.embedding IS NOT NULL"

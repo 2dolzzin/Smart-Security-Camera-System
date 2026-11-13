@@ -1,14 +1,11 @@
-# VLM 어댑터 서버(GPU 서버, conda env `cctv`)에서 설치.
-# vLLM(0.33)이 이미 깔린 env라면 torch/transformers/requests/opencv/numpy는 이미 있으므로
-# 아래 API 서버용 3개만 추가하면 된다:
-#   pip install fastapi "uvicorn[standard]" python-multipart
+# VLM 어댑터 서버 의존성
 fastapi
 uvicorn[standard]
 python-multipart
 requests
 numpy
 opencv-python-headless
-# bge-m3 임베딩 (transformers AutoModel로 직접 로드 — sentence-transformers 불필요)
 torch
 transformers
-# 모델 서버는 별도 프로세스: pip install vllm==0.33.0  (CLAUDE.md 참고)
+
+# 모델 서버(vLLM)는 별도 프로세스로 실행한다: pip install vllm==0.33.0

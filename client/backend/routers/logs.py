@@ -1,11 +1,12 @@
 """
 routers/logs.py
-움직임/이상 로그 조회 API.
+로그 조회/검색 API.
 
-  GET /api/logs?period=day|week|month&anomaly=1&type=Robbery
-  GET /api/logs/search?q=편의점에서 물건을 훔침&period=month&anomaly=1&top_k=20
-      → 질의를 VLM 서버 /embed 로 임베딩하고, SQLite 의 로그 임베딩과 코사인 유사도로 상위 N 반환
-  GET /api/logs/{id}
+  GET /api/logs?period=day|week|month&anomaly=1&type=Robbery   로그 목록
+  GET /api/logs/search?q=<질의>&period=month&anomaly=1&top_k=20   임베딩 유사도 검색
+  GET /api/logs/{id}                                            로그 상세
+
+/search 는 /{log_id} 보다 먼저 선언해야 경로가 올바르게 매칭된다.
 """
 
 from typing import Literal, Optional
@@ -28,9 +29,9 @@ def list_logs(
     type: Optional[str] = Query(None, description="이상 유형 필터 (예: Robbery)"),
 ):
     """
-    로그 목록. period에 따라 최근 1일 / 7일 / 30일 범위 반환.
-    각 로그는 창(window) 단위: window_start/window_end(녹화 내 초), is_anomaly, anomaly_type,
-    scene, action, objects, summary 를 가진다. description 은 summary 와 같음(구버전 UI 호환).
+    로그 목록. period 에 따라 최근 1일 / 7일 / 30일 범위를 반환한다.
+    각 로그는 창(window) 단위이며 window_start/window_end(녹화 내 초), is_anomaly, anomaly_type,
+    scene, action, objects, summary 를 가진다.
     """
     if type and type not in ANOMALY_TYPES:
         raise HTTPException(status_code=400, detail=f"type 은 {ANOMALY_TYPES} 중 하나")
@@ -47,7 +48,7 @@ def search_logs(
     top_k: int = Query(20, ge=1, le=100),
 ):
     """
-    자연어 검색. 질의 임베딩은 서버(/embed)에서, 유사도 계산은 클라이언트(numpy)에서.
+    자연어 검색. 질의를 VLM 서버 /embed 로 임베딩한 뒤 DB 의 로그 임베딩과 유사도를 계산한다.
     """
     if not VLM_SERVER_URL:
         raise HTTPException(status_code=503, detail="VLM_SERVER_URL 미설정 — 검색 불가")
