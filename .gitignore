@@ -1,17 +1,18 @@
-# ── OS ─────────────────────────────────────
+# OS
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# ── IDE / 에디터 ────────────────────────────
+# IDE / 에디터
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 .claude/
+CLAUDE.md
 
-# ── Python (backend / server) ──────────────
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -31,7 +32,7 @@ ENV/
 .env.*
 !.env.example
 
-# ── Node / Vite (frontend) ─────────────────
+# Node / Vite
 node_modules/
 dist/
 build/
@@ -42,29 +43,25 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
-# ── 프로젝트 산출물 (사생활·재생성 가능) ──────
-# SQLite DB (런타임 데이터, 자동 재생성)
+# SQLite DB (런타임 데이터)
 *.db
 *.db-wal
 *.db-shm
 *.sqlite
 *.sqlite3
 
-# 녹화 영상 (사생활!)
+# 녹화 영상
 client/backend/recordings/
 **/recordings/*.mp4
-**/recordings/*_raw.mp4
-**/recordings/*_vlm.mp4
 
 # debug.py 가 저장하는 캡처
 debug_capture_*.png
 
-# ── HuggingFace / 모델 캐시 ─────────────────
-# (서버에서만 발생하지만 혹시 모르니)
+# 모델 가중치 / 캐시
 .cache/
 *.bin
 *.safetensors
 
-# ── 기타 ────────────────────────────────────
+# 테스트 커버리지
 .coverage
 htmlcov/
