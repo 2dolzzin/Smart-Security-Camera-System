@@ -65,3 +65,15 @@ debug_capture_*.png
 # 테스트 커버리지
 .coverage
 htmlcov/
+
+# 연구 데이터 (대용량, 저장소 밖에 두고 research/ 아래로 링크하거나 복사)
+research/UCF_Crime
+research/UCF_Crime_raw
+research/Surveillance-Video-Understanding
+research/clips/frames
+research/lf/data
+research/lf/saves
+research/lf/models
+research/eval/*.jsonl
+research/demo/*.mp4
+research/demo/ingest

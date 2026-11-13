@@ -6,7 +6,7 @@
 |---|---|
 | 팀명 | (기재) |
 | 팀원 학번 / 이름 | (기재) |
-| GitHub | https://github.com/2dolzzin/Smart-Security-Camera-System |
+| GitHub | https://github.com/2dolzzin/scene_log |
 | 시연 영상 | (기재) |
 | 제출일 | 2026. 11. 16. |
 

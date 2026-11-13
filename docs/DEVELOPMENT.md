@@ -21,7 +21,7 @@
 ## 1. 저장소 구조
 
 ```
-Smart-Security-Camera-System/
+scene_log/
 ├── client/
 │   ├── backend/                  카메라가 연결된 PC에서 실행하는 FastAPI 서버
 │   │   ├── main.py               앱 진입점. DB, 카메라, 스케줄러 기동과 라우터 등록
@@ -57,7 +57,8 @@ Smart-Security-Camera-System/
 │   ├── *.py                      파이프라인 스크립트 6개
 │   ├── lf/                       LLaMA-Factory 학습·병합 설정
 │   ├── clips/                    클립 메타데이터, teacher 로그
-│   └── eval/                     조건별 지표
+│   ├── eval/                     조건별 지표
+│   └── demo/                     시연용 영상 구성과 실행 기록
 ├── scripts/                      실행 스크립트
 │   ├── run_client.sh             백엔드와 프론트엔드를 함께 실행
 │   ├── run_backend.sh

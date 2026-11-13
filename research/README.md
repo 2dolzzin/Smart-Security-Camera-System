@@ -16,6 +16,7 @@
 | `clips/manifest.csv` | 클립 5,405개의 메타데이터 |
 | `clips/teacher_logs.jsonl` | 클립별 학습 목표 로그 |
 | `eval/*_metrics.json` | 조건 A, B, C, B2의 지표 |
+| `demo/README.md` | 시연용 영상(`ucf_demo.mp4`)의 타임라인, 실행 명령, 예행연습 기록 |
 
 ## 저장소에 포함하지 않은 것
 
@@ -24,12 +25,15 @@
 | `clips/frames/` | 2.1 GB. `make_clips.py` 로 재생성 |
 | `lf/data/*.json` | `convert_lf.py` 로 재생성 |
 | `eval/*.jsonl` | 클립별 예측. `eval_test.py` 로 재생성 |
-| UCF-Crime 영상, UCA 주석 | 각 배포처에서 내려받음 |
-| 모델 가중치 | 용량 |
+| `UCF_Crime/`, `Surveillance-Video-Understanding/` | UCF-Crime 영상과 UCA 주석. 각 배포처에서 내려받음 |
+| `lf/saves/`, `lf/models/` | LoRA 어댑터와 병합 모델 가중치. 용량 |
+| `demo/*.mp4`, `demo/ingest/` | 시연용 영상. `demo/README.md` 의 ffmpeg 명령으로 재생성 |
+
+위 항목은 `.gitignore` 에 등록돼 있다. 이 디렉토리(`research/`)에 직접 두거나, 다른 위치에 두고 같은 이름의 심볼릭 링크를 만들면 스크립트가 그대로 동작한다.
 
 ## 실행 순서
 
-스크립트는 `UCF_Crime/` 과 `Surveillance-Video-Understanding/` 이 있는 디렉토리에서 실행한다. 경로는 각 스크립트 상단의 상수로 지정한다.
+스크립트는 `UCF_Crime/` 과 `Surveillance-Video-Understanding/` 이 있는 디렉토리(데이터 루트)에서 실행한다. 위처럼 데이터를 `research/` 아래에 두었다면 `research/` 가 데이터 루트다. 경로는 각 스크립트 상단의 상수로 지정한다.
 
 ```
 build_uca_table.py → classify_segments.py → make_clips.py → teacher_logs.py → convert_lf.py
